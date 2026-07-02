@@ -65,6 +65,24 @@
     (is (not (g/node-visible? hidden "n3")) "祖先 panel を隠すと子孫 text も不可視"))
   (is (g/node-visible? snodes "n3") "既定は可視"))
 
+(deftest panel-preset
+  (testing "\"1\" は基本枠いっぱいの1枚"
+    (is (= [g/youshi-inner-bounds] (g/panel-preset-rects "1" g/youshi-inner-bounds 0))))
+  (testing "\"2h\" は上下2枚、gutter 分の隙間を挟んで境界に接する"
+    (let [{:keys [y1 y2]} g/youshi-inner-bounds
+          [top bot] (g/panel-preset-rects "2h" g/youshi-inner-bounds 10)]
+      (is (= y1 (:y1 top))) (is (= y2 (:y2 bot)))
+      (is (== 10 (- (:y1 bot) (:y2 top))) "隣接パネル間の総隙間 = gutter(両辺 gutter/2 ずつ)")
+      (is (= (:x1 g/youshi-inner-bounds) (:x1 top) (:x1 bot)) "外周の辺は寄らない")))
+  (testing "\"2x2\" は4枚、未知キーは全面1枚にフォールバック"
+    (is (= 4 (count (g/panel-preset-rects "2x2" g/youshi-inner-bounds 10))))
+    (is (= 1 (count (g/panel-preset-rects "no-such-preset" g/youshi-inner-bounds 10))))))
+
+(deftest toggle-visible
+  (is (not (g/self-visible? (g/find-by-nid (g/toggle-node-visible snodes "n1") "n1"))))
+  (testing "2回反転で元に戻る"
+    (is (= snodes (g/toggle-node-visible (g/toggle-node-visible snodes "n1") "n1")))))
+
 (deftest reorder+reparent
   (testing "inside = 親付け替え(循環はガード)"
     (let [r (g/reorder-nodes snodes "n3" "n1" "inside")]

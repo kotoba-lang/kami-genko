@@ -51,6 +51,22 @@
   (swap! state (fn [db]
                  (-> (ed/push-undo db (snap db) ed/default-history-limit)
                      (update-in [:doc :pages (active-idx db) :nodes] (fnil conj []) node)))))
+(defn- commit-add-many! [nodes]
+  (when (seq nodes)
+    (swap! state (fn [db]
+                   (-> (ed/push-undo db (snap db) ed/default-history-limit)
+                       (update-in [:doc :pages (active-idx db) :nodes] (fnil into []) nodes))))))
+(defn apply-panel-preset! [preset-key]
+  (commit-add-many! (mapv #(g/panel-node (g/gen-nid) %)
+                          (g/panel-preset-rects preset-key g/youshi-inner-bounds))))
+(defn toggle-vis! [nid]
+  (swap! state (fn [db]
+                 (-> (ed/push-undo db (snap db) ed/default-history-limit)
+                     (update-in [:doc :pages (active-idx db) :nodes] g/toggle-node-visible nid)))))
+(defn reorder-node! [from-id to-id position]
+  (swap! state (fn [db]
+                 (-> (ed/push-undo db (snap db) ed/default-history-limit)
+                     (update-in [:doc :pages (active-idx db) :nodes] g/reorder-nodes from-id to-id position)))))
 (defn do-undo! [] (swap! state #(ed/undo % snap ed/restore)))
 (defn do-redo! [] (swap! state #(ed/redo % snap ed/restore)))
 
@@ -191,6 +207,15 @@
                  :style {:padding "4px 8px" :border-radius "6px" :cursor "pointer"
                          :background (if (= t (:tool db)) "#e06090" "#333") :color "#fff" :border "none"}}
         t])
+     [:select {:value "" :title "コマ割りプリセット"
+               :on-change (fn [e]
+                            (let [v (.. e -target -value)]
+                              (when (seq v) (apply-panel-preset! v))
+                              (set! (.. e -target -value) "")))
+               :style {:padding "4px" :border-radius "6px"}}
+      [:option {:value ""} "コマ割り…"]
+      (for [k ["1" "2h" "2v" "3h" "2x2"]]
+        ^{:key k} [:option {:value k} k])]
      [:span {:style {:flex "1"}}]
      [:button {:on-click export-json! :style {:padding "4px 8px"}} "⇩ export"]
      [:button {:on-click import-json! :style {:padding "4px 8px"}} "⇧ import"]
@@ -201,6 +226,13 @@
      [:span {:style {:margin-left "8px" :opacity 0.7}}
       (str (count (active-nodes db)) " nodes")]]))
 
+(defn- drop-position
+  "drop 先 row の中心より上なら before、下なら after(HTML5 DnD dragover 座標)。"
+  [e]
+  (let [rect (.getBoundingClientRect (.-currentTarget e))
+        mid (/ (+ (.-top rect) (.-bottom rect)) 2)]
+    (if (< (.-clientY e) mid) "before" "after")))
+
 (defn tree []
   (let [db @state
         rows (g/all-nodes (active-nodes db))]
@@ -209,10 +241,22 @@
      [:div {:style {:font-weight "bold" :margin-bottom "4px"}} "Nodes"]
      (for [row rows]
        ^{:key (:nid row)}
-       [:div {:on-click #(swap! state assoc :selection #{(:nid row)} :tool "select")
-              :style {:padding "2px 4px" :cursor "pointer" :border-radius "4px"
+       [:div {:draggable true
+              :on-drag-start (fn [e] (.setData (.-dataTransfer e) "text/plain" (:nid row)))
+              :on-drag-over (fn [e] (.preventDefault e))
+              :on-drop (fn [e]
+                         (.preventDefault e)
+                         (let [from (.getData (.-dataTransfer e) "text/plain")]
+                           (when (and (seq from) (not= from (:nid row)))
+                             (reorder-node! from (:nid row) (drop-position e)))))
+              :on-click #(swap! state assoc :selection #{(:nid row)} :tool "select")
+              :style {:padding "2px 4px" :cursor "grab" :border-radius "4px"
+                      :display "flex" :align-items "center" :gap "4px"
+                      :opacity (if (:vis row) 1 0.4)
                       :background (if (contains? (:selection db) (:nid row)) "#cfe3ff" "transparent")}}
-        (:nm row)])]))
+        [:span {:on-click (fn [e] (.stopPropagation e) (toggle-vis! (:nid row)))
+                :title "表示/非表示"} (if (:vis row) "👁" "🚫")]
+        [:span (:nm row)]])]))
 
 ;; ── boot ─────────────────────────────────────────────────────────────────────
 (defn ^:export main []
@@ -246,5 +290,11 @@
                :deleteSelected delete-selected!
                :nodeCount (fn [] (count (active-nodes @state)))
                :nodeTypes (fn [] (clj->js (mapv g/type-of (active-nodes @state))))
+               :nodeIds (fn [] (clj->js (mapv g/nid-of (active-nodes @state))))
+               :visibleNodeIds (fn [] (let [ns (active-nodes @state)]
+                                         (clj->js (filterv #(g/node-visible? ns (g/nid-of %)) (mapv g/nid-of ns)))))
+               :applyPreset apply-panel-preset!
+               :toggleVis toggle-vis!
+               :reorderNode reorder-node!
                :canUndo (fn [] (boolean (ed/can-undo? @state)))
                :canRedo (fn [] (boolean (ed/can-redo? @state)))})))

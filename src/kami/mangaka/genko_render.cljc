@@ -29,20 +29,24 @@
 
 (defn youshi-draws
   "原稿用紙(b4manga)の枠ガイド → draw-list。visible=false / type=\"none\" は空。
-   world px の固定ジオメトリ(portrait B4 比率; 外=裁ち落とし, 内=基本枠)。"
+   世界座標は g/youshi-outer-bounds(裁ち落とし) / g/youshi-inner-bounds(基本枠, パネル
+   プリセットが分割する対象と同じ SSoT)。"
   [{:keys [type visible]}]
   (if (or (false? visible) (= type "none"))
     []
-    [{:op :rect :x1 250 :y1 20 :x2 750 :y2 700 :color guide :width 1}
-     {:op :rect :x1 285 :y1 70 :x2 715 :y2 650 :color inner-guide :width 1}]))
+    (let [{ox1 :x1 oy1 :y1 ox2 :x2 oy2 :y2} g/youshi-outer-bounds
+          {ix1 :x1 iy1 :y1 ix2 :x2 iy2 :y2} g/youshi-inner-bounds]
+      [{:op :rect :x1 ox1 :y1 oy1 :x2 ox2 :y2 oy2 :color guide :width 1}
+       {:op :rect :x1 ix1 :y1 iy1 :x2 ix2 :y2 iy2 :color inner-guide :width 1}])))
 
 (defn draw-list
-  "nodes (serialized wrappers) → flat draw-op vector (world coords)。
-   `sel` (nid の set) はハイライト色に切り替える。"
+  "nodes (serialized wrappers) → flat draw-op vector (world coords)。不可視(祖先含む,
+   g/node-visible?)な node は描かない。`sel`(nid の set)はハイライト色に切り替える。"
   ([nodes] (draw-list nodes #{}))
   ([nodes sel]
    (vec (mapcat (fn [n]
-                  (let [hl (contains? sel (g/nid-of n))]
-                    (map #(cond-> % hl (assoc :color [0.11 0.45 0.90 1.0] :width 3))
-                         (node->draws n))))
+                  (when (g/node-visible? nodes (g/nid-of n))
+                    (let [hl (contains? sel (g/nid-of n))]
+                      (map #(cond-> % hl (assoc :color [0.11 0.45 0.90 1.0] :width 3))
+                           (node->draws n)))))
                 nodes))))

@@ -38,6 +38,22 @@
 (def brush-types      #{"fine" "pen" "marker" "brush" "flat" "eraser"})
 (def youshi-types     #{"b4manga" "b4koma" "none"})
 
+;; youshi(原稿用紙) の固定ジオメトリ(world px; portrait B4 比率)。外=裁ち落とし(tachikiri)、
+;; 内=基本枠(kihonwaku) — genko-render の youshi-draws とパネルプリセット生成が共有する SSoT。
+(def youshi-outer-bounds {:x1 250 :y1 20 :x2 750 :y2 700})
+(def youshi-inner-bounds {:x1 285 :y1 70 :x2 715 :y2 650})
+
+;; コマ割りプリセット: 基本枠を 0..1 の正規化 [x1 y1 x2 y2] 矩形の列に分割する語彙。
+;; cljs に Ratio 型が無いため分数リテラル(1/2 等)は使わず double 演算で表す。
+(def ^:private half 0.5)
+(def ^:private third (/ 1.0 3))
+(def panel-presets
+  {"1"   [[0 0 1 1]]
+   "2h"  [[0 0 1 half] [0 half 1 1]]
+   "2v"  [[0 0 half 1] [half 0 1 1]]
+   "3h"  [[0 0 1 third] [0 third 1 (* 2 third)] [0 (* 2 third) 1 1]]
+   "2x2" [[0 0 half half] [half 0 1 half] [0 half half 1] [half half 1 1]]})
+
 (def agent-colors
   {"shonen" "#e06060" "shojo" "#e060c0" "seinen" "#6060e0" "yonkoma" "#60c060"
    "mecha" "#6090e0" "horror" "#904090" "background" "#609060" "genga" "#c07020"
@@ -93,6 +109,24 @@
                panelName (assoc :panelName panelName)
                unit (assoc :_unit unit))
              (or parent "")))
+
+(defn panel-preset-rects
+  "コマ割りプリセット(panel-presets のキー)→ `bounds`(基本枠 {:x1 :y1 :x2 :y2})を
+  分割した {:x1 :y1 :x2 :y2} の列。隣接パネルの内側の辺だけ `gutter`(コマ間の隙間, px)の
+  半分ずつ内側へ寄せる(外周は基本枠に接する)。未知の preset-key は \"1\"(全面 1 コマ)。"
+  ([preset-key bounds] (panel-preset-rects preset-key bounds 12))
+  ([preset-key {:keys [x1 y1 x2 y2]} gutter]
+   (let [fracs (get panel-presets preset-key (get panel-presets "1"))
+         w (- x2 x1) h (- y2 y1) half (/ gutter 2)
+         edge (fn [origin len frac side]
+                (let [px (+ origin (* frac len))]
+                  (cond (and (= side :min) (pos? frac)) (+ px half)
+                        (and (= side :max) (< frac 1))  (- px half)
+                        :else px)))]
+     (mapv (fn [[fx1 fy1 fx2 fy2]]
+             {:x1 (edge x1 w fx1 :min) :y1 (edge y1 h fy1 :min)
+              :x2 (edge x1 w fx2 :max) :y2 (edge y1 h fy2 :max)})
+           fracs))))
 
 (defn fukidashi-node
   [id {:keys [x1 y1 x2 y2 fukiType fukiTail parent] :or {fukiType "oval" fukiTail "bottom"}}]
@@ -224,6 +258,12 @@
   (if (would-cycle? nodes child-id parent-id)
     nodes
     (replace-node nodes child-id #(set-parent* % parent-id))))
+
+(defn toggle-node-visible
+  "id の可視を反転(:visible と :data :_visible 両方に同じ値を書く)。"
+  [nodes id]
+  (replace-node nodes id (fn [n] (let [v (not (self-visible? n))]
+                                    (-> n (assoc :visible v) (assoc-in [:data :_visible] v))))))
 
 (defn- move-vec
   "from-id を to-id の before/after へ移す(親は変えない)。"
@@ -364,9 +404,7 @@
              "reparent"   (if (some? (:childNid d))
                             (nodes-> (fn [ns] (replace-node ns (:childNid d) #(set-parent* % (or (:parentNid d) "")))))
                             st)
-             "toggleVis"  (nodes-> (fn [ns] (replace-node ns (:nid d)
-                                                          (fn [n] (let [v (not (self-visible? n))]
-                                                                    (-> n (assoc :visible v) (assoc-in [:data :_visible] v)))))))
+             "toggleVis"  (nodes-> #(toggle-node-visible % (:nid d)))
              "youshiVis"  (assoc st :doc (update-in doc [:pages (:activePageIdx doc) :youshi :visible] not))
              "youshiType" (if (:type d)
                             (assoc st :doc (assoc-in doc [:pages (:activePageIdx doc) :youshi :type] (:type d)))
