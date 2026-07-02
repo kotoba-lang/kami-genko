@@ -44,5 +44,23 @@ pageToStoryboard / docToStoryboards`。境界で JS(JSON)⇄clj を変換し ver
 ## テスト
 
 ```bash
-clojure -M:test   # model / node-tree / cycle / visibility / reorder / JSON round-trip / oplog replay / bridge
+clojure -M:test              # model / node-tree / cycle / visibility / reorder / JSON round-trip / oplog replay / bridge
+npm run test:kotobase        # vendored kotobase.{cid,cacao,client} の node cljs.test(下記)
 ```
+
+## cljs-only genko エディタ (`kami.mangaka.genko-app`)
+
+`npx shadow-cljs release app` → `public/genko.html`。WebGL2 / reagent の全機能
+エディタ（ツール一式・コマ割りプリセット・pentab 筆圧・pan/zoom・node-tree）に加え、
+kotoba-server(kotobase.net) への永続を任意同期(「☁ save」/「☁ load」ボタン)として搭載。
+
+- **識別**: actor(ブラウザ)ごとに Ed25519 鍵(`localStorage` の `genko/kotoba-identity`,
+  ブラウザはファイルを書けないため JVM 版 `.actor/identity.edn` の等価物)を生成し、
+  did:key を自己発行 CACAO(SIWE/CAIP-122, DAG-CBOR)で認証する
+  (`src/kotobase/{cid,cacao,client}.cljc`, `kotobase-client` からの vendor)。
+- **既定の自動保存は localStorage のまま**(信頼性優先、ネットワーク往復をキー入力の
+  たびに走らせない)。kotoba-server 同期は明示ボタン操作。
+- graph アドレスは `kotobase/db/<did>/<db-name>` の CID(AT Protocol の `at://` では
+  ない)。UI 表示用に `at://<did>/kotoba.genko.doc/<db-name>` 形の識別子も用意するが、
+  これはこの app 内の表示規約であり汎用 AT-URI リゾルバでの解決は想定しない。
+

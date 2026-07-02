@@ -23,6 +23,12 @@
                       thheller/shadow-cljs      {:mvn/version "2.28.20"}
                       reagent/reagent           {:mvn/version "1.2.0"}}}
 
+  ;; shadow-cljs :kotobase-test(:node-test) の classpath に cljs-test/ を足すだけの
+  ;; alias。cljs 専用構文(cljs.test / npm require)の vendored test を JVM の
+  ;; clojure -M:test(cognitect.test-runner, test/ を scan)から隔離するため
+  ;; test/ とは別ディレクトリに置く。
+  :cljs-test {:extra-paths ["cljs-test"]}
+
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
                        {:git/tag "v0.5.1" :git/sha "dfb30dd"}

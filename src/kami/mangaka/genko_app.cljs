@@ -7,14 +7,18 @@
   (export/import 併設)+ pan/zoom(freeboard.board 移植)。UI は reagent。DOM/GPU/入力は
   cljs host interop。
 
-  残り parity: B2/PDS 永続(kotoba-server, CACAO 自己発行認証)+ AT-URI アドレッシング —
-  ブラウザ向け CACAO 実装(kotobase.cacao.cljc 等)は他リポに存在するが :browser
-  shadow-cljs ターゲットでの実績が無く、別増分として要検証。"
+  kotoba-server(kotobase.net)への CACAO 自己発行永続(vendored kotobase.{cid,cacao,
+  client})を任意同期として搭載。既定の自動保存は引き続き localStorage(信頼性優先、
+  ネットワーク往復をキー入力のたびに走らせない)。"
   (:require [reagent.core :as r]
             [reagent.dom :as rdom]
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
-            [kotoba.editor :as ed]))
+            [kotoba.editor :as ed]
+            ["@noble/curves/ed25519.js" :refer [ed25519]]
+            [kotobase.cid :as kcid]
+            [kotobase.cacao :as kcacao]
+            [kotobase.client :as kc]))
 
 ;; ── editor state (kotoba.editor db: :doc + :undo-stack + :redo-stack) ─────────
 (defonce state
@@ -22,7 +26,7 @@
            :undo-stack [] :redo-stack []
            :tool "draw" :selection #{} :draft nil
            :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"
-           :viewport gr/default-viewport :pan-from nil}))
+           :viewport gr/default-viewport :pan-from nil :kotoba-status nil}))
 
 ;; ── persistence: host-injectable :save/:load port; default = localStorage ─────
 ;; genko doc は g/write-doc(cljs=JSON.stringify) / g/read-doc(cljs=parse+normalize)。
@@ -49,6 +53,83 @@
                                                   (swap! state assoc :doc d :selection #{} :undo-stack [] :redo-stack []))))
                     (.readAsText rd f))))
     (.click inp)))
+
+;; ── kotoba-server(kotobase.net) 永続: actor 自身の鍵で CACAO を自己発行 ───────────
+;; 秘密鍵(32byte Ed25519 seed)は localStorage に保持(JVM 版の .<actor>/identity.edn
+;; に相当するブラウザの等価物; ブラウザはファイルを書けない)。既定の自動保存には
+;; 使わず(ネットワーク往復をキー入力のたびに走らせたくない)、明示操作(⛅ボタン)で
+;; 呼ぶ任意同期として persist port とは別に用意する。
+(def kotoba-endpoint "https://kotobase.net")
+(def kotoba-db-name "genko-mangaka")
+(def ^:private kotoba-identity-key "genko/kotoba-identity")
+
+(defn- load-or-create-kotoba-secret-key! []
+  (if-let [s (js/localStorage.getItem kotoba-identity-key)]
+    (kcacao/base64->bytes s)
+    (let [seed (.getRandomValues js/crypto (js/Uint8Array. 32))]
+      (js/localStorage.setItem kotoba-identity-key (kcacao/bytes->base64 seed))
+      seed)))
+
+(defonce kotoba-secret-key (load-or-create-kotoba-secret-key!))
+(defonce kotoba-did (kcid/did-key-from-ed25519-pub (.getPublicKey ed25519 kotoba-secret-key)))
+(defonce kotoba-client (kc/make-client {:endpoint kotoba-endpoint
+                                        :secret-key kotoba-secret-key
+                                        :operator-did kotoba-did}))
+
+;; kotoba-server の datomic 面は AT Protocol の at://did/collection/rkey では
+;; なく CID(kotobase/db/<did>/<db-name>)で addressing する(実測、ADR注記参照)。
+;; ユーザ向けの安定した「この doc の場所」表示としては at:// 形の識別子が
+;; 読みやすいので、実ストレージキー(CID graph)とは別に表示用の規約として作る
+;; (このURI自体を解決する汎用 AT Protocol リゾルバは想定しない)。
+(def kotoba-at-uri (str "at://" kotoba-did "/kotoba.genko.doc/" kotoba-db-name))
+
+;; 実測で判明した kotobase.net の datomic 面の制約(ライブ検証、2026-07-02):
+;; - :db/id は整数 tempid でなければならない(文字列 tempid は黙って 0 datom で
+;;   no-op になる) — client_request_test.cljc の `-1` 慣習どおり。
+;; - entity id は(整数 eid でなく)不透明な CID 文字列 — "最新" は eid 順序でなく
+;;   自前の :genko/updated-at(ISO8601 文字列, 辞書順=時系列順)で判定する。
+;; - サーバの EDN reader は文字列値中のエスケープ済みダブルクォート(\")を正しく
+;;   扱えない(2属性目以降が黙って消える)。JSON を直接埋め込まず base64 で包む。
+(defn kotoba-save!
+  "現在の doc を kotobase.net の operator db(kotoba-db-name)へ transact する
+  (CACAO は kc/transact が呼ぶたびに自己発行、ttl 300s)。Promise を返す。"
+  []
+  (let [tx (str "[{:db/id -1 :genko/doc-json \"" (js/btoa (g/write-doc (:doc @state)))
+               "\" :genko/updated-at \"" (.toISOString (js/Date.)) "\"}]")]
+    (kc/transact kotoba-client kotoba-db-name tx)))
+
+(defn kotoba-load!
+  "kotoba-db-name の :genko/doc-json(base64)+ :genko/updated-at を持つ全行を取得し、
+  updated-at 降順で最初にデコード成功したものを doc として復元する(壊れた/異物の
+  行が新しい timestamp を騙っていても無視して次点にフォールバックする)。1件も
+  無ければ resolve(nil)。"
+  []
+  (-> (kc/q kotoba-client kotoba-db-name
+           "{:find [?v ?t] :where [[?e :genko/doc-json ?v] [?e :genko/updated-at ?t]]}")
+      (.then (fn [^js res]
+               (let [rows (js->clj (.-rows_edn res))
+                     decoded (mapv (fn [[v t]] [(kc/decode-edn-scalar v) (kc/decode-edn-scalar t)]) rows)
+                     newest-first (->> decoded (sort-by second) reverse)]
+                 (some (fn [[v _t]]
+                         (try (g/read-doc (js/atob v)) (catch :default _ nil)))
+                       newest-first))))))
+
+(defn kotoba-sync-save! []
+  (swap! state assoc :kotoba-status :saving)
+  (-> (kotoba-save!)
+      (.then (fn [_] (swap! state assoc :kotoba-status :saved)))
+      (.catch (fn [err] (js/console.error "kotoba save failed:" err)
+                (swap! state assoc :kotoba-status [:error (.-message err)])))))
+
+(defn kotoba-sync-load! []
+  (swap! state assoc :kotoba-status :loading)
+  (-> (kotoba-load!)
+      (.then (fn [doc]
+               (if doc
+                 (do (swap! state assoc :doc doc :selection #{} :kotoba-status :loaded))
+                 (swap! state assoc :kotoba-status [:error "no doc on server"]))))
+      (.catch (fn [err] (js/console.error "kotoba load failed:" err)
+                (swap! state assoc :kotoba-status [:error (.-message err)])))))
 
 (defn- snap [db] (ed/snapshot db [:doc]))
 (defn- active-idx [db] (get-in db [:doc :activePageIdx] 0))
@@ -294,6 +375,14 @@
      [:span {:style {:flex "1"}}]
      [:button {:on-click export-json! :style {:padding "4px 8px"}} "⇩ export"]
      [:button {:on-click import-json! :style {:padding "4px 8px"}} "⇧ import"]
+     [:button {:on-click kotoba-sync-save! :title (str kotoba-at-uri " へ保存(" kotoba-endpoint ")")
+               :style {:padding "4px 8px"}} "☁ save"]
+     [:button {:on-click kotoba-sync-load! :title (str kotoba-at-uri " から読込")
+               :style {:padding "4px 8px"}} "☁ load"]
+     (when-let [st (:kotoba-status db)]
+       [:span {:style {:opacity 0.8 :color (if (vector? st) "#e06060" "#8fdc8f")}}
+        (case st :saving "…" :saved "☁✓" :loading "…" :loaded "☁✓"
+              (str "☁✗ " (second st)))])
      [:button {:on-click do-undo! :disabled (not (ed/can-undo? db))
                :style {:padding "4px 8px"}} "↶ undo"]
      [:button {:on-click do-redo! :disabled (not (ed/can-redo? db))
@@ -391,4 +480,14 @@
                :worldToScreen (fn [wx wy] (clj->js (gr/world->screen (:viewport @state) [wx wy])))
                :screenToWorld (fn [sx sy] (clj->js (gr/screen->world (:viewport @state) [sx sy])))
                :canUndo (fn [] (boolean (ed/can-undo? @state)))
-               :canRedo (fn [] (boolean (ed/can-redo? @state)))})))
+               :canRedo (fn [] (boolean (ed/can-redo? @state)))
+               :kotobaDid (fn [] kotoba-did)
+               :kotobaAtUri (fn [] kotoba-at-uri)
+               :kotobaGraph (fn [] (kcid/canonical-graph kotoba-did kotoba-db-name))
+               :kotobaSave (fn [] (kotoba-save!))
+               :kotobaLoad (fn [] (kotoba-load!))
+               :kotobaClient (fn [] kotoba-client)
+               :kotobaDatoms (fn [] (.then (kc/datoms kotoba-client kotoba-db-name ":eavt") clj->js))
+               :kotobaQ (fn [query-edn] (.then (kc/q kotoba-client kotoba-db-name query-edn) clj->js))
+               :kotobaTransact (fn [tx-edn] (.then (kc/transact kotoba-client kotoba-db-name tx-edn) clj->js))
+               :kotobaPull (fn [entity pattern-edn] (.then (kc/pull kotoba-client kotoba-db-name entity pattern-edn) clj->js))})))
