@@ -16,7 +16,8 @@
 (defonce state
   (r/atom {:doc (g/new-doc "Mangaka" {:page-id (g/gen-nid) :youshi-id (g/gen-nid)})
            :undo-stack [] :redo-stack []
-           :tool "draw" :selection #{} :draft nil}))
+           :tool "draw" :selection #{} :draft nil
+           :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"}))
 
 ;; ── persistence: host-injectable :save/:load port; default = localStorage ─────
 ;; genko doc は g/write-doc(cljs=JSON.stringify) / g/read-doc(cljs=parse+normalize)。
@@ -114,14 +115,29 @@
     :ellipse (ellipse-pts o)
     []))
 
-(defn- draw-op! [gl coll W H {:keys [color] :as o} loop?]
+(defn- gl-mode
+  "draw op の :mode → GL 描画プリミティブ(:strip/:fan=塗り, :loop/:line=線; 既定 :line)。"
+  [gl mode]
+  (case mode
+    :strip (.-TRIANGLE_STRIP gl)
+    :fan   (.-TRIANGLE_FAN gl)
+    :loop  (.-LINE_LOOP gl)
+    (.-LINE_STRIP gl)))
+
+(defn- draw-op! [gl coll W H {:keys [color mode] :as o}]
   (let [pts (op->pts o)]
     (when (seq pts)
       (let [flat (clj->js (mapcat #(world->clip W H %) pts))
             arr (js/Float32Array. flat)]
         (.bufferData gl (.-ARRAY_BUFFER gl) arr (.-DYNAMIC_DRAW gl))
         (apply js-invoke gl "uniform4f" coll color)
-        (.drawArrays gl (if loop? (.-LINE_LOOP gl) (.-LINE_STRIP gl)) 0 (count pts))))))
+        (.drawArrays gl (gl-mode gl mode) 0 (count pts))))))
+
+(defn- draft-mode [{:keys [op _kind]}]
+  (cond (= op :rect) :loop
+        (= op :ellipse) :loop
+        (= _kind "stroke") :line
+        :else :line))
 
 (defn render! []
   (when-let [{:keys [gl coll]} @gl-state]
@@ -133,11 +149,15 @@
       (.viewport gl 0 0 W H)
       (.clearColor gl 0.94 0.918 0.84 1.0) ; cream
       (.clear gl (.-COLOR_BUFFER_BIT gl))
-      (doseq [o draws] (draw-op! gl coll W H o (not= :poly (:op o))))
-      (when draft (draw-op! gl coll W H draft (= :rect (:op draft)))))))
+      (doseq [o draws] (draw-op! gl coll W H o))
+      (when draft (draw-op! gl coll W H (assoc draft :mode (draft-mode draft)))))))
 
 ;; ── pointer input → tool actions ─────────────────────────────────────────────
-(defn- evt-pt [e] (let [t (.-currentTarget e)] [(.-offsetX e) (.-offsetY e)]))
+;; pentab 筆圧: PointerEvent.pressure(pen=0..1 実測値、mouse/未対応touchは 0 か 0.5 固定)。
+;; 0 は「圧力センサ無し」を意味するため 0.6 にフォールバックし、潰れたストロークを防ぐ。
+(defn- evt-pt [e]
+  (let [p (.-pressure e)]
+    [(.-offsetX e) (.-offsetY e) (if (pos? p) p 0.6)]))
 
 (defn- hit-test [db [px py]]
   (->> (active-nodes db) reverse
@@ -152,10 +172,10 @@
       (commit-add! (g/text-node (g/gen-nid) {:x x :y y :text t})))))
 
 (defn- on-down [e]
-  (let [[x y] (evt-pt e) db @state]
+  (let [[x y p] (evt-pt e) db @state]
     (case (:tool db)
       "select" (swap! state assoc :selection (if-let [nid (hit-test db [x y])] #{nid} #{}))
-      "draw"   (swap! state assoc :draft {:op :poly :points [[x y]] :color gr/ink :size 2 :_kind "stroke"})
+      "draw"   (swap! state assoc :draft {:op :poly :points [[x y p]] :color gr/ink :size 4 :_kind "stroke"})
       "panel"  (swap! state assoc :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "panel"})
       "fukidashi" (swap! state assoc :draft {:op :ellipse :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "fukidashi"})
       "tone"   (swap! state assoc :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color [0.5 0.5 0.5 0.6] :_kind "tone"})
@@ -165,20 +185,22 @@
 
 (defn- on-move [e]
   (when (:draft @state)
-    (let [[x y] (evt-pt e)]
+    (let [[x y p] (evt-pt e)]
       (swap! state update :draft
-             (fn [d] (if (= :poly (:op d)) (update d :points conj [x y]) (assoc d :x2 x :y2 y))))
+             (fn [d] (if (= :poly (:op d)) (update d :points conj [x y p]) (assoc d :x2 x :y2 y))))
       (render!))))
 
 (defn- on-up [_]
   (when-let [d (:draft @state)]
-    (let [id (g/gen-nid)
+    (let [db @state
+          id (g/gen-nid)
           node (case (:_kind d)
-                 "stroke" (g/wrap-node id "stroke" {:points (mapv (fn [[x y]] {:x x :y y}) (:points d))
-                                                    :color (:color d) :size 2})
+                 "stroke" (g/wrap-node id "stroke" {:points (mapv (fn [[x y p]] {:x x :y y :p p}) (:points d))
+                                                    :color (:color d) :size (:size d)})
                  "panel"  (g/panel-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d)})
-                 "fukidashi" (g/fukidashi-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d) :fukiType "oval"})
-                 "tone"   (g/tone-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d) :tonePattern "dot"})
+                 "fukidashi" (g/fukidashi-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d)
+                                                    :fukiType (:fuki-type db) :fukiTail (:fuki-tail db)})
+                 "tone"   (g/tone-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d) :tonePattern (:tone-pattern db)})
                  nil)]
       (swap! state assoc :draft nil)
       (when node (commit-add! node)))
@@ -216,6 +238,21 @@
       [:option {:value ""} "コマ割り…"]
       (for [k ["1" "2h" "2v" "3h" "2x2"]]
         ^{:key k} [:option {:value k} k])]
+     (when (= "fukidashi" (:tool db))
+       [:select {:key "fuki-type" :value (:fuki-type db) :title "吹き出し種別"
+                 :on-change #(swap! state assoc :fuki-type (.. % -target -value))
+                 :style {:padding "4px" :border-radius "6px"}}
+        (for [ft (sort g/fukidashi-types)] ^{:key ft} [:option {:value ft} ft])])
+     (when (= "fukidashi" (:tool db))
+       [:select {:key "fuki-tail" :value (:fuki-tail db) :title "しっぽの向き"
+                 :on-change #(swap! state assoc :fuki-tail (.. % -target -value))
+                 :style {:padding "4px" :border-radius "6px"}}
+        (for [ft (sort g/fukidashi-tails)] ^{:key ft} [:option {:value ft} ft])])
+     (when (= "tone" (:tool db))
+       [:select {:key "tone-pattern" :value (:tone-pattern db) :title "トーンパターン"
+                 :on-change #(swap! state assoc :tone-pattern (.. % -target -value))
+                 :style {:padding "4px" :border-radius "6px"}}
+        (for [tp (sort g/tone-patterns)] ^{:key tp} [:option {:value tp} tp])])
      [:span {:style {:flex "1"}}]
      [:button {:on-click export-json! :style {:padding "4px 8px"}} "⇩ export"]
      [:button {:on-click import-json! :style {:padding "4px 8px"}} "⇧ import"]
@@ -285,7 +322,16 @@
     (set! (.-genkoApi js/globalThis)          ; verification helpers
           #js {:doUndo do-undo! :doRedo do-redo!
                :addPanel (fn [x1 y1 x2 y2] (commit-add! (g/panel-node (g/gen-nid) {:x1 x1 :y1 y1 :x2 x2 :y2 y2})))
-               :addTone (fn [x1 y1 x2 y2] (commit-add! (g/tone-node (g/gen-nid) {:x1 x1 :y1 y1 :x2 x2 :y2 y2 :tonePattern "dot"})))
+               :addTone (fn [x1 y1 x2 y2 & [pattern]]
+                          (commit-add! (g/tone-node (g/gen-nid) {:x1 x1 :y1 y1 :x2 x2 :y2 y2 :tonePattern (or pattern "dot")})))
+               :addFukidashi (fn [x1 y1 x2 y2 & [fuki-type fuki-tail]]
+                               (commit-add! (g/fukidashi-node (g/gen-nid) {:x1 x1 :y1 y1 :x2 x2 :y2 y2
+                                                                            :fukiType (or fuki-type "oval")
+                                                                            :fukiTail (or fuki-tail "bottom")})))
+               :addStroke (fn [pts-js size] (commit-add! (g/wrap-node (g/gen-nid) "stroke"
+                                                           {:points (js->clj pts-js :keywordize-keys true)
+                                                            :color gr/ink :size (or size 4)})))
+               :drawOpModes (fn [] (clj->js (mapv :mode (gr/draw-list (active-nodes @state) #{}))))
                :selectFirst (fn [] (when-let [n (first (active-nodes @state))] (swap! state assoc :selection #{(g/nid-of n)}) true))
                :deleteSelected delete-selected!
                :nodeCount (fn [] (count (active-nodes @state)))
