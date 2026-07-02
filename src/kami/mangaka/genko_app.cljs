@@ -18,6 +18,32 @@
            :undo-stack [] :redo-stack []
            :tool "draw" :selection #{} :draft nil}))
 
+;; ── persistence: host-injectable :save/:load port; default = localStorage ─────
+;; genko doc は g/write-doc(cljs=JSON.stringify) / g/read-doc(cljs=parse+normalize)。
+;; SDK/host が B2/PDS transport を後から差し込める(port は kotoba の host-injection 流儀)。
+(def store-key "genko/doc")
+(defn- local-save! [doc] (js/localStorage.setItem store-key (g/write-doc doc)))
+(defn- local-load []
+  (when-let [s (js/localStorage.getItem store-key)] (g/read-doc s)))
+(defonce persist (atom {:save local-save! :load local-load}))
+(defn save-doc! [] (when-let [f (:save @persist)] (f (:doc @state))))
+(defn load-doc! [] (when-let [d (some-> (:load @persist) (apply []))] (swap! state assoc :doc d :selection #{})))
+(defn- iso-name [] (str "genko-" (.replace (.toISOString (js/Date.)) #"[:.]" "-") ".json"))
+(defn export-json! []
+  (let [blob (js/Blob. #js [(g/write-doc (:doc @state))] #js {:type "application/json"})
+        url (js/URL.createObjectURL blob)
+        a (js/document.createElement "a")]
+    (set! (.-href a) url) (set! (.-download a) (iso-name)) (.click a) (js/URL.revokeObjectURL url)))
+(defn import-json! []
+  (let [inp (js/document.createElement "input")]
+    (set! (.-type inp) "file") (set! (.-accept inp) ".json")
+    (set! (.-onchange inp)
+          (fn [e] (let [f (aget (.. e -target -files) 0) rd (js/FileReader.)]
+                    (set! (.-onload rd) (fn [_] (when-let [d (g/read-doc (.-result rd))]
+                                                  (swap! state assoc :doc d :selection #{} :undo-stack [] :redo-stack []))))
+                    (.readAsText rd f))))
+    (.click inp)))
+
 (defn- snap [db] (ed/snapshot db [:doc]))
 (defn- active-idx [db] (get-in db [:doc :activePageIdx] 0))
 (defn- active-nodes [db] (get-in db [:doc :pages (active-idx db) :nodes] []))
@@ -166,6 +192,8 @@
                          :background (if (= t (:tool db)) "#e06090" "#333") :color "#fff" :border "none"}}
         t])
      [:span {:style {:flex "1"}}]
+     [:button {:on-click export-json! :style {:padding "4px 8px"}} "⇩ export"]
+     [:button {:on-click import-json! :style {:padding "4px 8px"}} "⇧ import"]
      [:button {:on-click do-undo! :disabled (not (ed/can-undo? db))
                :style {:padding "4px 8px"}} "↶ undo"]
      [:button {:on-click do-redo! :disabled (not (ed/can-redo? db))
@@ -203,9 +231,11 @@
           (case (.-key e)
             ("Delete" "Backspace") (do (.preventDefault e) (delete-selected!))
             nil))))
+    (load-doc!) ; localStorage から復元(あれば)
     (rdom/render [toolbar] (js/document.getElementById "bar"))
     (rdom/render [tree] (js/document.getElementById "side"))
     (add-watch state :render (fn [_ _ _ _] (render!)))
+    (add-watch state :autosave (fn [_ _ old new] (when (not= (:doc old) (:doc new)) (save-doc!))))
     (render!)
     (set! (.-genkoState js/globalThis) state) ; browser 検証フック
     (set! (.-genkoApi js/globalThis)          ; verification helpers
