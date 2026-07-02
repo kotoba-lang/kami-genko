@@ -11,7 +11,11 @@
 {:paths ["src"]
 
  :deps {org.clojure/clojure   {:mvn/version "1.12.0"}
-        org.clojure/data.json {:mvn/version "2.5.0"}}   ; clj: genko JSON doc の read/write
+        org.clojure/data.json {:mvn/version "2.5.0"}   ; clj: genko JSON doc の read/write
+        ;; shitsuke の kotoba.editor (portable editor kernel: selection/undo/redo/nudge/align)。
+        ;; KamiGenko.editor が全ドキュメント snapshot undo/redo に使う (ADR-2607020300 段階1)。zero-dep。
+        io.github.kotoba-lang/shitsuke {:git/url "https://github.com/kotoba-lang/shitsuke.git"
+                                        :git/sha "d7988c24f5cb37074b6bfc1f0c2e223f4e218f84"}}
 
  :aliases
  {;; Browser bridge: globalThis.KamiGenko を install する単一 JS を出す (reader と同型)。
