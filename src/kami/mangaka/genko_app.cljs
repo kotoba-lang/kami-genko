@@ -85,7 +85,8 @@
   (when-let [{:keys [gl coll]} @gl-state]
     (let [cv (.-canvas gl) W (.-width cv) H (.-height cv)
           db @state
-          draws (gr/draw-list (active-nodes db) (:selection db))
+          youshi (get-in db [:doc :pages (active-idx db) :youshi])
+          draws (into (gr/youshi-draws youshi) (gr/draw-list (active-nodes db) (:selection db)))
           draft (:draft db)]
       (.viewport gl 0 0 W H)
       (.clearColor gl 0.94 0.918 0.84 1.0) ; cream
@@ -103,6 +104,11 @@
                                   (<= (min (:y1 d) (:y2 d)) py (max (:y1 d) (:y2 d))))
                          (g/nid-of n)))))))
 
+(defn- place-text! [[x y]]
+  (when-let [t (js/window.prompt "テキスト:" "セリフ")]
+    (when (seq t)
+      (commit-add! (g/text-node (g/gen-nid) {:x x :y y :text t})))))
+
 (defn- on-down [e]
   (let [[x y] (evt-pt e) db @state]
     (case (:tool db)
@@ -110,6 +116,8 @@
       "draw"   (swap! state assoc :draft {:op :poly :points [[x y]] :color gr/ink :size 2 :_kind "stroke"})
       "panel"  (swap! state assoc :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "panel"})
       "fukidashi" (swap! state assoc :draft {:op :ellipse :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "fukidashi"})
+      "tone"   (swap! state assoc :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color [0.5 0.5 0.5 0.6] :_kind "tone"})
+      "text"   (place-text! [x y])
       nil)
     (render!)))
 
@@ -128,13 +136,23 @@
                                                     :color (:color d) :size 2})
                  "panel"  (g/panel-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d)})
                  "fukidashi" (g/fukidashi-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d) :fukiType "oval"})
+                 "tone"   (g/tone-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d) :tonePattern "dot"})
                  nil)]
       (swap! state assoc :draft nil)
       (when node (commit-add! node)))
     (render!)))
 
+(defn delete-selected! []
+  (let [sel (:selection @state)]
+    (when (seq sel)
+      (swap! state (fn [db]
+                     (-> (ed/push-undo db (snap db) ed/default-history-limit)
+                         (update-in [:doc :pages (active-idx db) :nodes]
+                                    (fn [ns] (filterv #(not (contains? sel (g/nid-of %))) ns)))
+                         (assoc :selection #{})))))))
+
 ;; ── reagent UI (toolbar + node tree) ─────────────────────────────────────────
-(def tools ["select" "draw" "panel" "fukidashi"])
+(def tools ["select" "draw" "panel" "fukidashi" "tone" "text"])
 
 (defn toolbar []
   (let [db @state]
@@ -176,11 +194,15 @@
     (.addEventListener cv "pointermove" on-move)
     (js/window.addEventListener "pointerup" on-up)
     (js/window.addEventListener "keydown"
-      (fn [e] (when (or (.-ctrlKey e) (.-metaKey e))
-                (case (.-key e)
-                  "z" (do (.preventDefault e) (if (.-shiftKey e) (do-redo!) (do-undo!)))
-                  "y" (do (.preventDefault e) (do-redo!))
-                  nil))))
+      (fn [e]
+        (if (or (.-ctrlKey e) (.-metaKey e))
+          (case (.-key e)
+            "z" (do (.preventDefault e) (if (.-shiftKey e) (do-redo!) (do-undo!)))
+            "y" (do (.preventDefault e) (do-redo!))
+            nil)
+          (case (.-key e)
+            ("Delete" "Backspace") (do (.preventDefault e) (delete-selected!))
+            nil))))
     (rdom/render [toolbar] (js/document.getElementById "bar"))
     (rdom/render [tree] (js/document.getElementById "side"))
     (add-watch state :render (fn [_ _ _ _] (render!)))
@@ -189,6 +211,10 @@
     (set! (.-genkoApi js/globalThis)          ; verification helpers
           #js {:doUndo do-undo! :doRedo do-redo!
                :addPanel (fn [x1 y1 x2 y2] (commit-add! (g/panel-node (g/gen-nid) {:x1 x1 :y1 y1 :x2 x2 :y2 y2})))
+               :addTone (fn [x1 y1 x2 y2] (commit-add! (g/tone-node (g/gen-nid) {:x1 x1 :y1 y1 :x2 x2 :y2 y2 :tonePattern "dot"})))
+               :selectFirst (fn [] (when-let [n (first (active-nodes @state))] (swap! state assoc :selection #{(g/nid-of n)}) true))
+               :deleteSelected delete-selected!
                :nodeCount (fn [] (count (active-nodes @state)))
+               :nodeTypes (fn [] (clj->js (mapv g/type-of (active-nodes @state))))
                :canUndo (fn [] (boolean (ed/can-undo? @state)))
                :canRedo (fn [] (boolean (ed/can-redo? @state)))})))
