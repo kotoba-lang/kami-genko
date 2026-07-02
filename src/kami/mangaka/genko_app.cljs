@@ -1,11 +1,15 @@
 (ns kami.mangaka.genko-app
-  "cljs-only genko manga editor (ADR-2607020300). genko-embed.ts(手書き TS ランタイム)を
-  廃し、エディタ全体を cljs で実装する第一段: doc モデル(kami.mangaka.genko) + 全ドキュメント
-  undo/redo(shitsuke kotoba.editor) + WebGL2 2D 描画(genko-render の draw-list) + 基本ツール
-  (select / panel / draw)。UI は reagent。DOM/GPU/入力は cljs host interop。
+  "cljs-only genko manga editor (ADR-2607020300)。genko-embed.ts(手書き TS ランタイム)を
+  廃し、エディタ全体を cljs で実装する: doc モデル(kami.mangaka.genko) + 全ドキュメント
+  undo/redo(shitsuke kotoba.editor) + WebGL2 2D 描画(genko-render の draw-list) + ツール
+  (select/draw/panel/fukidashi/tone/text、pentab 筆圧・fukiType/fukiTail・tonePattern
+  対応)+ コマ割りプリセット + node-tree(drag並べ替え・可視トグル)+ localStorage 永続
+  (export/import 併設)+ pan/zoom(freeboard.board 移植)。UI は reagent。DOM/GPU/入力は
+  cljs host interop。
 
-  今後の parity 対象: fukidashi/tone/text ツール, pentab 筆圧, youshi グリッド, tree drag,
-  B2/PDS 永続, AT-URI。まずは『cljs だけで動く genko』の土台をブラウザ実機で確立する。"
+  残り parity: B2/PDS 永続(kotoba-server, CACAO 自己発行認証)+ AT-URI アドレッシング —
+  ブラウザ向け CACAO 実装(kotobase.cacao.cljc 等)は他リポに存在するが :browser
+  shadow-cljs ターゲットでの実績が無く、別増分として要検証。"
   (:require [reagent.core :as r]
             [reagent.dom :as rdom]
             [kami.mangaka.genko :as g]
@@ -17,7 +21,8 @@
   (r/atom {:doc (g/new-doc "Mangaka" {:page-id (g/gen-nid) :youshi-id (g/gen-nid)})
            :undo-stack [] :redo-stack []
            :tool "draw" :selection #{} :draft nil
-           :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"}))
+           :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"
+           :viewport gr/default-viewport :pan-from nil}))
 
 ;; ── persistence: host-injectable :save/:load port; default = localStorage ─────
 ;; genko doc は g/write-doc(cljs=JSON.stringify) / g/read-doc(cljs=parse+normalize)。
@@ -100,7 +105,9 @@
       (.vertexAttribPointer gl posl 2 (.-FLOAT gl) false 0 0)
       (reset! gl-state {:gl gl :prog prog :buf buf :coll coll}))))
 
-(defn- world->clip [W H [x y]] [(- (* (/ x W) 2.0) 1.0) (- 1.0 (* (/ y H) 2.0))])
+(defn- world->clip [W H vp [wx wy]]
+  (let [[sx sy] (gr/world->screen vp [wx wy])]
+    [(- (* (/ sx W) 2.0) 1.0) (- 1.0 (* (/ sy H) 2.0))]))
 
 (defn- ellipse-pts [{:keys [x1 y1 x2 y2]}]
   (let [cx (/ (+ x1 x2) 2.0) cy (/ (+ y1 y2) 2.0)
@@ -124,10 +131,10 @@
     :loop  (.-LINE_LOOP gl)
     (.-LINE_STRIP gl)))
 
-(defn- draw-op! [gl coll W H {:keys [color mode] :as o}]
+(defn- draw-op! [gl coll W H vp {:keys [color mode] :as o}]
   (let [pts (op->pts o)]
     (when (seq pts)
-      (let [flat (clj->js (mapcat #(world->clip W H %) pts))
+      (let [flat (clj->js (mapcat #(world->clip W H vp %) pts))
             arr (js/Float32Array. flat)]
         (.bufferData gl (.-ARRAY_BUFFER gl) arr (.-DYNAMIC_DRAW gl))
         (apply js-invoke gl "uniform4f" coll color)
@@ -143,21 +150,31 @@
   (when-let [{:keys [gl coll]} @gl-state]
     (let [cv (.-canvas gl) W (.-width cv) H (.-height cv)
           db @state
+          vp (:viewport db)
           youshi (get-in db [:doc :pages (active-idx db) :youshi])
           draws (into (gr/youshi-draws youshi) (gr/draw-list (active-nodes db) (:selection db)))
           draft (:draft db)]
-      (.viewport gl 0 0 W H)
+      (.viewport gl 0 0 W H) ; GL viewport(描画先ピクセル範囲) — 編集用 pan/zoom の vp とは別物
       (.clearColor gl 0.94 0.918 0.84 1.0) ; cream
       (.clear gl (.-COLOR_BUFFER_BIT gl))
-      (doseq [o draws] (draw-op! gl coll W H o))
-      (when draft (draw-op! gl coll W H (assoc draft :mode (draft-mode draft)))))))
+      (doseq [o draws] (draw-op! gl coll W H vp o))
+      (when draft (draw-op! gl coll W H vp (assoc draft :mode (draft-mode draft)))))))
 
 ;; ── pointer input → tool actions ─────────────────────────────────────────────
+;; canvas は attribute 解像度(1000x720 = world->screen が仮定する座標系)を CSS で
+;; ウィンドウに合わせて伸縮表示する(genko.html の calc())。offsetX/offsetY は CSS px
+;; なので、attribute/CSS 比でスケールしないと buffer 解像度 ≠ 表示サイズの窓幅で
+;; pan/zoom・描画位置がずれる(evt-pt が currentTarget を捨てて素通ししていた既存の穴)。
+(defn- event-screen-xy [e]
+  (let [cv (.-currentTarget e) rect (.getBoundingClientRect cv)]
+    [(* (.-offsetX e) (/ (.-width cv) (.-width rect)))
+     (* (.-offsetY e) (/ (.-height cv) (.-height rect)))]))
+
 ;; pentab 筆圧: PointerEvent.pressure(pen=0..1 実測値、mouse/未対応touchは 0 か 0.5 固定)。
 ;; 0 は「圧力センサ無し」を意味するため 0.6 にフォールバックし、潰れたストロークを防ぐ。
 (defn- evt-pt [e]
-  (let [p (.-pressure e)]
-    [(.-offsetX e) (.-offsetY e) (if (pos? p) p 0.6)]))
+  (let [[sx sy] (event-screen-xy e) p (.-pressure e)]
+    [sx sy (if (pos? p) p 0.6)]))
 
 (defn- hit-test [db [px py]]
   (->> (active-nodes db) reverse
@@ -171,10 +188,15 @@
     (when (seq t)
       (commit-add! (g/text-node (g/gen-nid) {:x x :y y :text t})))))
 
+;; select ツールで空白をドラッグしたら pan(freeboard.board と同じ UX)。ドラッグ中の
+;; 増分は screen 座標(offsetX/Y)のまま gr/pan-viewport に渡す(pan は screen delta 引数)。
 (defn- on-down [e]
-  (let [[x y p] (evt-pt e) db @state]
+  (let [[sx sy p] (evt-pt e) db @state
+        [x y] (gr/screen->world (:viewport db) [sx sy])]
     (case (:tool db)
-      "select" (swap! state assoc :selection (if-let [nid (hit-test db [x y])] #{nid} #{}))
+      "select" (if-let [nid (hit-test db [x y])]
+                 (swap! state assoc :selection #{nid})
+                 (swap! state assoc :selection #{} :pan-from [sx sy]))
       "draw"   (swap! state assoc :draft {:op :poly :points [[x y p]] :color gr/ink :size 4 :_kind "stroke"})
       "panel"  (swap! state assoc :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "panel"})
       "fukidashi" (swap! state assoc :draft {:op :ellipse :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "fukidashi"})
@@ -184,13 +206,29 @@
     (render!)))
 
 (defn- on-move [e]
-  (when (:draft @state)
-    (let [[x y p] (evt-pt e)]
-      (swap! state update :draft
-             (fn [d] (if (= :poly (:op d)) (update d :points conj [x y p]) (assoc d :x2 x :y2 y))))
-      (render!))))
+  (let [db @state]
+    (cond
+      (:pan-from db)
+      (let [[sx sy] (event-screen-xy e) [lx ly] (:pan-from db)]
+        (swap! state (fn [d] (-> d (update :viewport gr/pan-viewport (- sx lx) (- sy ly))
+                                  (assoc :pan-from [sx sy]))))
+        (render!))
+      (:draft db)
+      (let [[sx sy p] (evt-pt e) [x y] (gr/screen->world (:viewport db) [sx sy])]
+        (swap! state update :draft
+               (fn [d] (if (= :poly (:op d)) (update d :points conj [x y p]) (assoc d :x2 x :y2 y))))
+        (render!)))))
+
+(defn- on-wheel [e]
+  (.preventDefault e)
+  (let [vp (:viewport @state)
+        factor (if (neg? (.-deltaY e)) 1.1 (/ 1.0 1.1))
+        cursor (event-screen-xy e)]
+    (swap! state update :viewport gr/zoom-viewport (* (:zoom vp) factor) cursor)
+    (render!)))
 
 (defn- on-up [_]
+  (swap! state assoc :pan-from nil)
   (when-let [d (:draft @state)]
     (let [db @state
           id (g/gen-nid)
@@ -260,8 +298,11 @@
                :style {:padding "4px 8px"}} "↶ undo"]
      [:button {:on-click do-redo! :disabled (not (ed/can-redo? db))
                :style {:padding "4px 8px"}} "↷ redo"]
+     [:button {:on-click #(swap! state assoc :viewport gr/default-viewport)
+               :title "空白ドラッグ=pan、ホイール=zoom"
+               :style {:padding "4px 8px"}} "⌂ view"]
      [:span {:style {:margin-left "8px" :opacity 0.7}}
-      (str (count (active-nodes db)) " nodes")]]))
+      (str (count (active-nodes db)) " nodes · " (.toFixed (* 100 (:zoom (:viewport db))) 0) "%")]]))
 
 (defn- drop-position
   "drop 先 row の中心より上なら before、下なら after(HTML5 DnD dragover 座標)。"
@@ -302,6 +343,7 @@
     (.addEventListener cv "pointerdown" on-down)
     (.addEventListener cv "pointermove" on-move)
     (js/window.addEventListener "pointerup" on-up)
+    (.addEventListener cv "wheel" on-wheel #js {:passive false})
     (js/window.addEventListener "keydown"
       (fn [e]
         (if (or (.-ctrlKey e) (.-metaKey e))
@@ -342,5 +384,11 @@
                :applyPreset apply-panel-preset!
                :toggleVis toggle-vis!
                :reorderNode reorder-node!
+               :getViewport (fn [] (clj->js (:viewport @state)))
+               :setViewport (fn [x y zoom] (swap! state assoc :viewport {:x x :y y :zoom zoom}) (render!))
+               :panBy (fn [dx dy] (swap! state update :viewport gr/pan-viewport dx dy) (render!))
+               :zoomAt (fn [new-zoom sx sy] (swap! state update :viewport gr/zoom-viewport new-zoom [sx sy]) (render!))
+               :worldToScreen (fn [wx wy] (clj->js (gr/world->screen (:viewport @state) [wx wy])))
+               :screenToWorld (fn [sx sy] (clj->js (gr/screen->world (:viewport @state) [sx sy])))
                :canUndo (fn [] (boolean (ed/can-undo? @state)))
                :canRedo (fn [] (boolean (ed/can-redo? @state)))})))
