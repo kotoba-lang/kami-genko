@@ -3,6 +3,33 @@
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]))
 
+(deftest viewport-transforms
+  (testing "既定 viewport は world = screen(恒等変換)"
+    (is (= [10.0 20.0] (gr/world->screen gr/default-viewport [10 20])))
+    (is (= [10.0 20.0] (gr/screen->world gr/default-viewport [10 20]))))
+  (testing "world->screen と screen->world は互いに逆変換(round-trip)"
+    (let [vp {:x 50 :y -30 :zoom 2.5}]
+      (doseq [pt [[0 0] [100 200] [-40 15]]]
+        (let [[sx sy] (gr/world->screen vp pt)
+              [wx wy] (gr/screen->world vp [sx sy])]
+          (is (< (Math/abs (- wx (first pt))) 1e-9))
+          (is (< (Math/abs (- wy (second pt))) 1e-9))))))
+  (testing "pan-viewport は screen delta を zoom で割った分だけ world 原点を動かす"
+    (let [vp {:x 0.0 :y 0.0 :zoom 2.0}
+          panned (gr/pan-viewport vp 20 10)]
+      (is (= -10.0 (:x panned))) (is (= -5.0 (:y panned)))))
+  (testing "zoom-viewport はクランプし、カーソル下の world 点を固定する(zoom-to-cursor)"
+    (let [vp {:x 0.0 :y 0.0 :zoom 1.0}
+          cursor [100 200]
+          before (gr/screen->world vp cursor)
+          zoomed (gr/zoom-viewport vp 3.0 cursor)
+          after (gr/screen->world zoomed cursor)]
+      (is (= 3.0 (:zoom zoomed)))
+      (is (< (Math/abs (- (first before) (first after))) 1e-9))
+      (is (< (Math/abs (- (second before) (second after))) 1e-9)))
+    (is (= 8.0 (:zoom (gr/zoom-viewport gr/default-viewport 999 [0 0]))) "max-zoom でクランプ")
+    (is (= 0.2 (:zoom (gr/zoom-viewport gr/default-viewport 0.0001 [0 0]))) "min-zoom でクランプ")))
+
 (deftest fuki-outline-shapes
   (testing "oval は48点の輪郭"
     (is (= 48 (count (gr/ellipse-outline-pts 0 0 100 100)))))

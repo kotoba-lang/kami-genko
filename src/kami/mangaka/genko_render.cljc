@@ -10,6 +10,33 @@
 
 (def ink [0.09 0.09 0.09 1.0])
 
+;; ── viewport(pan/zoom) — freeboard.board(kotoba-lang/freeboard)の viewport を
+;; 移植した純関数。doc の node 座標は常に world 固定、host は screen(canvas px)
+;; との往復に world->screen/screen->world を介す(pointer 入力は入口で screen→world
+;; に変換して doc に積み、描画は world→screen→clip で毎フレーム投影する)。────────
+(def default-viewport {:x 0.0 :y 0.0 :zoom 1.0})
+(def ^:private min-zoom 0.2)
+(def ^:private max-zoom 8.0)
+
+(defn world->screen [{:keys [x y zoom]} [wx wy]]
+  [(* (- wx x) zoom) (* (- wy y) zoom)])
+
+(defn screen->world [{:keys [x y zoom]} [sx sy]]
+  [(+ x (/ sx zoom)) (+ y (/ sy zoom))])
+
+(defn pan-viewport
+  "screen 座標系のドラッグ量(dx-screen dy-screen)だけ pan する。"
+  [{:keys [zoom] :as vp} dx-screen dy-screen]
+  (-> vp (update :x - (/ dx-screen zoom)) (update :y - (/ dy-screen zoom))))
+
+(defn zoom-viewport
+  "screen 点 [sx sy](ズーム中心、通常カーソル位置)の下の world 点を固定したまま
+  new-zoom(min-zoom..max-zoom にクランプ)へズームする。"
+  [vp new-zoom [sx sy]]
+  (let [z (max min-zoom (min max-zoom new-zoom))
+        [wx wy] (screen->world vp [sx sy])]
+    {:x (- wx (/ sx z)) :y (- wy (/ sy z)) :zoom z}))
+
 ;; cljs に無い Math 静的メソッドを reader-conditional で吸収(genko.cljc の gen-nid と同型)。
 #?(:clj (defn- cos [a] (Math/cos a)) :cljs (defn- cos [a] (js/Math.cos a)))
 #?(:clj (defn- sin [a] (Math/sin a)) :cljs (defn- sin [a] (js/Math.sin a)))
