@@ -24,6 +24,18 @@
                     :color [0.7 0.1 0.45 1.0] :width 1}]
       nil)))
 
+(def guide [0.6 0.6 0.55 1.0])
+(def inner-guide [0.72 0.78 0.9 1.0])
+
+(defn youshi-draws
+  "原稿用紙(b4manga)の枠ガイド → draw-list。visible=false / type=\"none\" は空。
+   world px の固定ジオメトリ(portrait B4 比率; 外=裁ち落とし, 内=基本枠)。"
+  [{:keys [type visible]}]
+  (if (or (false? visible) (= type "none"))
+    []
+    [{:op :rect :x1 250 :y1 20 :x2 750 :y2 700 :color guide :width 1}
+     {:op :rect :x1 285 :y1 70 :x2 715 :y2 650 :color inner-guide :width 1}]))
+
 (defn draw-list
   "nodes (serialized wrappers) → flat draw-op vector (world coords)。
    `sel` (nid の set) はハイライト色に切り替える。"
