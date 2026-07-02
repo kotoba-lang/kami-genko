@@ -20,7 +20,8 @@
  :aliases
  {;; Browser bridge: globalThis.KamiGenko を install する単一 JS を出す (reader と同型)。
   :cljs {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
-                      thheller/shadow-cljs      {:mvn/version "2.28.20"}}}
+                      thheller/shadow-cljs      {:mvn/version "2.28.20"}
+                      reagent/reagent           {:mvn/version "1.2.0"}}}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner

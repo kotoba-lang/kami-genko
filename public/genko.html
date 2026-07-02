@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>原稿 genko (cljs)</title>
+<style>
+  html,body{margin:0;height:100%;background:#f0ead6;font-family:'Nunito',system-ui,sans-serif}
+  #bar{position:fixed;top:0;left:0;right:0;height:40px;z-index:2}
+  #side{position:fixed;top:40px;left:0;bottom:0;width:200px;z-index:2}
+  #gl{position:fixed;top:40px;left:200px;right:0;bottom:0;width:calc(100% - 200px);height:calc(100% - 40px);
+      background:#f0ead6;touch-action:none;cursor:crosshair}
+  button:disabled{opacity:.4}
+</style></head>
+<body>
+  <div id="bar"></div>
+  <div id="side"></div>
+  <canvas id="gl" width="1000" height="720"></canvas>
+  <script src="js/genko-app.js"></script>
+</body></html>

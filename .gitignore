@@ -2,3 +2,4 @@
 /dist
 /.shadow-cljs
 /.cpcache
+/public/js
