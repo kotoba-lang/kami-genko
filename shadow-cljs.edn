@@ -1,9 +1,12 @@
-;; shadow-cljs build for the genko JS bridge (ADR-2607020200). Pulls cljs/shadow
-;; from deps.edn :cljs alias. Release output = a single dist/kami-genko.js that,
-;; on load, installs `globalThis.KamiGenko` (genko-embed.ts の inline JS が委譲する
-;; model/tree/oplog/serialize/bridge API)。reader の shadow-cljs.edn と同型。
+;; shadow-cljs builds for kami-genko (ADR-2607020200 / 2607020300). deps は :cljs alias。
+;;  :genko — globalThis.KamiGenko bridge (dist/kami-genko.js)。
+;;  :app   — cljs-only genko editor (public/js/genko-app.js, init-fn genko-app/main)。
 {:deps   {:aliases [:cljs]}
  :builds {:genko {:target     :browser
                   :output-dir "dist"
                   :asset-path "."
-                  :modules    {:kami-genko {:init-fn kami.mangaka.genko-js/install!}}}}}
+                  :modules    {:kami-genko {:init-fn kami.mangaka.genko-js/install!}}}
+          :app   {:target     :browser
+                  :output-dir "public/js"
+                  :asset-path "js"
+                  :modules    {:genko-app {:init-fn kami.mangaka.genko-app/main}}}}}
