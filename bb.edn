@@ -1,0 +1,7 @@
+;; kami-mangaka-genko-clj — task runner. Pure genko document model; bb runs tests.
+{:min-bb-version "1.0.0"
+ :paths ["src" "test"]
+ :tasks
+ {:requires ([babashka.process :as p])
+  test {:doc "Run the genko document-model tests (node tree / oplog / serialize / storyboard bridge)"
+        :task (p/shell "clojure -M:test")}}}

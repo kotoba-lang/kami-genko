@@ -1,0 +1,9 @@
+{
+  "name": "kami-mangaka-genko",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "shadow-cljs release genko"
+  },
+  "devDependencies": { "shadow-cljs": "2.28.20" }
+}
