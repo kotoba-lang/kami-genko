@@ -1,7 +1,9 @@
 ;; shadow-cljs builds for kami-genko (ADR-2607020200 / 2607020300). deps は :cljs alias。
 ;;  :genko — globalThis.KamiGenko bridge (dist/kami-genko.js)。
 ;;  :app   — cljs-only genko editor (public/js/genko-app.js, init-fn genko-app/main)。
-{:deps   {:aliases [:cljs]}
+;;  :kotobase-test — vendored kotobase.{cid,cacao,client}(-test) の node cljs.test
+;;    (kotobase.net CACAO 自己発行クライアント; @noble/curves + @ipld/dag-cbor 使用)。
+{:deps   {:aliases [:cljs :cljs-test]}
  :builds {:genko {:target     :browser
                   :output-dir "dist"
                   :asset-path "."
@@ -9,4 +11,8 @@
           :app   {:target     :browser
                   :output-dir "public/js"
                   :asset-path "js"
-                  :modules    {:genko-app {:init-fn kami.mangaka.genko-app/main}}}}}
+                  :modules    {:genko-app {:init-fn kami.mangaka.genko-app/main}}}
+          :kotobase-test
+          {:target :node-test
+           :output-to "out/kotobase-tests.js"
+           :ns-regexp "^kotobase\\..*-test$"}}}
