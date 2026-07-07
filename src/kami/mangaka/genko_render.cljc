@@ -6,36 +6,38 @@
   各 draw op は `:mode` で描画プリミティブを明示する(:loop=LINE_LOOP 閉曲線,
   :line=LINE_STRIP 開曲線, :fan=TRIANGLE_FAN 塗り凸多角形(周回順の頂点),
   :strip=TRIANGLE_STRIP 塗りリボン(L/R 交互頂点、pentab 筆圧ストローク用))。"
-  (:require [kami.mangaka.genko :as g]))
+  (:require [kami.mangaka.genko :as g]
+            [canvaskit.scroll-view :as cksv]
+            [canvaskit.viewport :as ckvp]))
 
 (def ink [0.09 0.09 0.09 1.0])
 
-;; ── viewport(pan/zoom) — freeboard.board(kotoba-lang/freeboard)の viewport を
-;; 移植した純関数。doc の node 座標は常に world 固定、host は screen(canvas px)
-;; との往復に world->screen/screen->world を介す(pointer 入力は入口で screen→world
-;; に変換して doc に積み、描画は world→screen→clip で毎フレーム投影する)。────────
+;; ── viewport(pan/zoom) — 実装は kotoba-lang/canvaskit(UIScrollView semantics、
+;; ADR-2607071130。旧: freeboard.board からの移植コピーを正本へ差し戻し)。
+;; doc/API は従来どおり {:x :y :zoom}(node 座標は常に world 固定、host は
+;; screen(canvas px) との往復に world->screen/screen->world を介す — pointer 入力は
+;; 入口で screen→world に変換して doc に積み、描画は world→screen→clip で毎フレーム投影)。────────
 (def default-viewport {:x 0.0 :y 0.0 :zoom 1.0})
-(def ^:private min-zoom 0.2)
-(def ^:private max-zoom 8.0)
+(def ^:private zoom-limits {:minimum-zoom-scale 0.2 :maximum-zoom-scale 8.0})
 
-(defn world->screen [{:keys [x y zoom]} [wx wy]]
-  [(* (- wx x) zoom) (* (- wy y) zoom)])
+(defn- ->scroll-view [vp] (ckvp/from-viewport vp zoom-limits))
 
-(defn screen->world [{:keys [x y zoom]} [sx sy]]
-  [(+ x (/ sx zoom)) (+ y (/ sy zoom))])
+(defn world->screen [vp world-pt]
+  (cksv/convert-point-to-view (->scroll-view vp) world-pt))
+
+(defn screen->world [vp screen-pt]
+  (cksv/convert-point-from-view (->scroll-view vp) screen-pt))
 
 (defn pan-viewport
   "screen 座標系のドラッグ量(dx-screen dy-screen)だけ pan する。"
-  [{:keys [zoom] :as vp} dx-screen dy-screen]
-  (-> vp (update :x - (/ dx-screen zoom)) (update :y - (/ dy-screen zoom))))
+  [vp dx-screen dy-screen]
+  (ckvp/to-viewport (cksv/scroll-by (->scroll-view vp) [(- dx-screen) (- dy-screen)])))
 
 (defn zoom-viewport
   "screen 点 [sx sy](ズーム中心、通常カーソル位置)の下の world 点を固定したまま
-  new-zoom(min-zoom..max-zoom にクランプ)へズームする。"
-  [vp new-zoom [sx sy]]
-  (let [z (max min-zoom (min max-zoom new-zoom))
-        [wx wy] (screen->world vp [sx sy])]
-    {:x (- wx (/ sx z)) :y (- wy (/ sy z)) :zoom z}))
+  new-zoom(0.2..8.0 にクランプ)へズームする。"
+  [vp new-zoom screen-pt]
+  (ckvp/to-viewport (cksv/zoom-to-point (->scroll-view vp) new-zoom screen-pt)))
 
 ;; cljs に無い Math 静的メソッドを reader-conditional で吸収(genko.cljc の gen-nid と同型)。
 #?(:clj (defn- cos [a] (Math/cos a)) :cljs (defn- cos [a] (js/Math.cos a)))
