@@ -19,7 +19,7 @@
         ;; canvaskit: viewport 数学の正本 (UIScrollView semantics)。genko-render の
         ;; pan/zoom/world<->screen が委譲する (ADR-2607071130。旧 freeboard 移植コピーを差し戻し)。zero-dep。
         io.github.kotoba-lang/canvaskit {:git/url "https://github.com/kotoba-lang/canvaskit.git"
-                                         :git/sha "fba5b558710faa1414f1e42573aa211645a864e1"}}
+                                         :git/sha "2e8ab2a996d5f405a9fd601e42993451c1f34874"}}
 
  :aliases
  {;; Browser bridge: globalThis.KamiGenko を install する単一 JS を出す (reader と同型)。

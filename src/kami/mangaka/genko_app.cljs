@@ -18,7 +18,8 @@
             ["@noble/curves/ed25519.js" :refer [ed25519]]
             [kotobase.cid :as kcid]
             [kotobase.cacao :as kcacao]
-            [kotobase.client :as kc]))
+            [kotobase.client :as kc]
+            [canvaskit.hit-test :as ckht]))
 
 ;; ── editor state (kotoba.editor db: :doc + :undo-stack + :redo-stack) ─────────
 (defonce state
@@ -257,12 +258,18 @@
   (let [[sx sy] (event-screen-xy e) p (.-pressure e)]
     [sx sy (if (pos? p) p 0.6)]))
 
-(defn- hit-test [db [px py]]
-  (->> (active-nodes db) reverse
-       (some (fn [n] (let [d (g/node-data n)]
-                       (when (and (:x1 d) (<= (min (:x1 d) (:x2 d)) px (max (:x1 d) (:x2 d)))
-                                  (<= (min (:y1 d) (:y2 d)) py (max (:y1 d) (:y2 d))))
-                         (g/nid-of n)))))))
+(defn- hit-test
+  "world 点に当たる最前面 node の nid。canvaskit.hit-test へ委譲(ADR-2607071130):
+  全 node 同 z なので「後勝ち(subviews 順)」= 旧 reverse+some と同じ順序。"
+  [db world-pt]
+  (:nid (ckht/hit-test
+         (keep (fn [n]
+                 (let [{:keys [x1 y1 x2 y2]} (g/node-data n)]
+                   (when x1
+                     {:frame [(min x1 x2) (min y1 y2) (abs (- x2 x1)) (abs (- y2 y1))]
+                      :nid (g/nid-of n)})))
+               (active-nodes db))
+         world-pt)))
 
 (defn- place-text! [[x y]]
   (when-let [t (js/window.prompt "テキスト:" "セリフ")]
