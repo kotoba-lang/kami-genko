@@ -15,7 +15,11 @@
         ;; shitsuke の kotoba.editor (portable editor kernel: selection/undo/redo/nudge/align)。
         ;; KamiGenko.editor が全ドキュメント snapshot undo/redo に使う (ADR-2607020300 段階1)。zero-dep。
         io.github.kotoba-lang/shitsuke {:git/url "https://github.com/kotoba-lang/shitsuke.git"
-                                        :git/sha "d7988c24f5cb37074b6bfc1f0c2e223f4e218f84"}}
+                                        :git/sha "d7988c24f5cb37074b6bfc1f0c2e223f4e218f84"}
+        ;; canvaskit: viewport 数学の正本 (UIScrollView semantics)。genko-render の
+        ;; pan/zoom/world<->screen が委譲する (ADR-2607071130。旧 freeboard 移植コピーを差し戻し)。zero-dep。
+        io.github.kotoba-lang/canvaskit {:git/url "https://github.com/kotoba-lang/canvaskit.git"
+                                         :git/sha "fba5b558710faa1414f1e42573aa211645a864e1"}}
 
  :aliases
  {;; Browser bridge: globalThis.KamiGenko を install する単一 JS を出す (reader と同型)。
