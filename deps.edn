@@ -42,4 +42,9 @@
                        {:git/url "https://github.com/kotoba-lang/kami-engine.git"
                         :git/sha "60c9a095c04000b7af4ee2ddc293386739980690"
                         :deps/root "kami-mangaka-expression-clj"}}
-         :main-opts   ["-m" "cognitect.test-runner"]}}}
+         :main-opts   ["-m" "cognitect.test-runner"]}
+
+  ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                     "--fail-level" "error"]}}}
