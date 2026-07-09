@@ -29,7 +29,14 @@
         ;; come from this repo's own package.json (already present).
         io.github.kotoba-lang/kotobase-client
         {:git/url "https://github.com/kotoba-lang/kotobase-client.git"
-         :git/sha "bbebe33d6888c915b64b32e5fc68720fac3aa97e"}}
+         :git/sha "bbebe33d6888c915b64b32e5fc68720fac3aa97e"}
+        ;; datascript: in-memory Datalog query engine (kami.mangaka.genko-query,
+        ;; ADR-2607091900) — a LOCAL read-side query projection over genko doc/page
+        ;; EDN, NOT kotobase.net's server-side {:q :transact! :db :pull :entid}
+        ;; engine and NOT a new source of truth (doc EDN via read-doc/write-doc
+        ;; remains canonical; see genko_query.cljc docstring). Portable cljc/cljs
+        ;; lib (Maven-published, no npm counterpart needed for shadow-cljs).
+        datascript/datascript {:mvn/version "1.7.8"}}
 
  :aliases
  {;; Browser bridge: globalThis.KamiGenko を install する単一 JS を出す (reader と同型)。
@@ -42,6 +49,13 @@
   ;; smoke test を JVM の clojure -M:test(cognitect.test-runner, test/ を scan)
   ;; から隔離するため test/ とは別ディレクトリに置く。
   :cljs-test {:extra-paths ["cljs-test"]}
+
+  ;; shadow-cljs :genko-query-test(:node-test) の classpath に test/ を足すだけの
+  ;; alias (ADR-2607091900 datascript query capability, portability check).
+  ;; :test alias 一式(cognitect test-runner + kami-mangaka-expression git dep,
+  ;; どちらも JVM 専用/test-only)は要らないので、test/ を挟むだけの最小 alias に
+  ;; 分けて kami.mangaka.genko-query-test だけを cljs (node) 上でも確認する。
+  :cljs-query-test {:extra-paths ["test"]}
 
   :test {:extra-paths ["test"]
          :extra-deps  {io.github.cognitect-labs/test-runner
