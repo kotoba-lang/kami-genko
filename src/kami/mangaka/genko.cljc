@@ -38,8 +38,10 @@
 (def brush-types      #{"fine" "pen" "marker" "brush" "flat" "eraser"})
 (def youshi-types     #{"b4manga" "b4koma" "none"})
 
-;; youshi(原稿用紙) の固定ジオメトリ(world px; portrait B4 比率)。外=裁ち落とし(tachikiri)、
-;; 内=基本枠(kihonwaku) — genko-render の youshi-draws とパネルプリセット生成が共有する SSoT。
+;; youshi(原稿用紙) の旧固定ジオメトリ(world px; bare-rect 世代)。現行の SSoT は
+;; kami.mangaka.genko-render の youshi-templates(genko-embed.ts の mm 実寸スペック)と
+;; そこから導出される youshi-{paper,trim,frame,safe}-bounds — youshi-draws と
+;; genko-ui の :apply-preset はそちらを使う。この2定数は互換のため残置(非推奨)。
 (def youshi-outer-bounds {:x1 250 :y1 20 :x2 750 :y2 700})
 (def youshi-inner-bounds {:x1 285 :y1 70 :x2 715 :y2 650})
 

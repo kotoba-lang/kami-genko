@@ -186,20 +186,186 @@
                     :color [0.7 0.1 0.45 1.0] :width 1}]
       nil)))
 
-(def guide [0.6 0.6 0.55 1.0])
-(def inner-guide [0.72 0.78 0.9 1.0])
+;; ── 原稿用紙 (genkouyoushi) templates ───────────────────────────────────────
+;; SSoT = kami-engine-sdk src/lib/genko/genko-embed.ts の YOUSHI / tessellateYoushi
+;; (週刊少年ジャンプ特製漫画原稿用紙再現、実寸 mm ベース)の忠実移植:
+;;   B4判 用紙全体:       0,0 → 257,364 mm
+;;   裁ち落とし枠 (trim):  18,18 → 239,346 (仕上がり B5 182×257mm + α)
+;;   基本枠 (outer):       25,27 → 232,337 (印刷領域)
+;;   内枠 (inner/safe):    53.5,72 → 203.5,292 (150×220mm テキスト安全域)
+;;   目盛り: 用紙4辺 1mm 小(2mm 長)/ 5mm 大(4mm 長)、目盛り帯は 4辺 15mm 幅
+;;   トンボ: 裁ち落とし枠4隅 (L字 10mm 内向き + 十字 ±2mm) + 4辺中央 (バー ±3mm + 10mm 内向き)
+;;   4コマ分割線 (b4koma): 内枠を縦4等分する水平線 3本
+;;   センターマーク: 内枠4辺中央の外側に十字
+;;   色: ガイド水色 CB=[0.55 0.78 0.92](枠 α=0.6/0.8/0.9, 目盛り α=0.7)、
+;;       コマ分割 CG=[0.7 0.7 0.7] α=0.4、トンボ 黒 α=0.5/0.4、
+;;       紙面 [0.98 0.98 0.97]、目盛り帯 [0.88 0.94 0.97]、机(desk)= #f0ead6
+;;   線幅: 0.15..0.7mm(embed は最低 0.5px の半幅で tessellate — fit スケール
+;;       ≈1.87px/mm では実質 ≈1px。本 renderer は hairline で描く=同等の見た目)。
+;; mm→world px: world 窓 1000×720 に、旧 bare-rect 世代の縦帯 (y 20..700) を保つ
+;; uniform scale youshi-px-per-mm = 680/364 ≈ 1.8681、紙面は x=500 に中央寄せ。
+
+(def youshi-templates
+  "原稿用紙 template spec (mm)。key = page の :youshi :type (g/youshi-types)。"
+  {"none"    {:draw false}
+   "b4manga" {:draw true :w-mm 257.0 :h-mm 364.0
+              :trim  {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0}
+              :outer {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0}
+              :inner {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0}
+              :ruler-step 5 :ruler-small 1}
+   "b4koma"  {:draw true :w-mm 257.0 :h-mm 364.0
+              :trim  {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0}
+              :outer {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0}
+              :inner {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0}
+              :ruler-step 5 :ruler-small 1 :koma 4}})
+
+(def youshi-px-per-mm
+  "mm→world px の uniform scale。B4 の紙高 364mm を旧 bare-rect 世代の縦帯
+  y 20..700 (680px) にはめる = 680/364 ≈ 1.8681。"
+  (/ 680.0 364.0))
+
+(def youshi-origin
+  "紙面左上の world 座標 [x y]。x=500 中央寄せ、y=20(旧世代の上端と同じ)。"
+  [(- 500.0 (* 257.0 0.5 youshi-px-per-mm)) 20.0])
+
+(defn mm->world
+  "原稿用紙 mm 座標(紙左上原点)→ world px [x y]。"
+  [mx my]
+  (let [[ox oy] youshi-origin]
+    [(+ ox (* mx youshi-px-per-mm)) (+ oy (* my youshi-px-per-mm))]))
+
+(defn- mm-rect->world [{:keys [x1 y1 x2 y2]}]
+  (let [[wx1 wy1] (mm->world x1 y1) [wx2 wy2] (mm->world x2 y2)]
+    {:x1 wx1 :y1 wy1 :x2 wx2 :y2 wy2}))
+
+(def youshi-paper-bounds
+  "用紙全体 (B4 257×364mm) の world 座標。"
+  (mm-rect->world {:x1 0.0 :y1 0.0 :x2 257.0 :y2 364.0}))
+(def youshi-trim-bounds
+  "裁ち落とし枠 (trim) の world 座標。"
+  (mm-rect->world (:trim (youshi-templates "b4manga"))))
+(def youshi-frame-bounds
+  "基本枠 (印刷領域) の world 座標。"
+  (mm-rect->world (:outer (youshi-templates "b4manga"))))
+(def youshi-safe-bounds
+  "内枠 (150×220mm テキスト安全域) の world 座標。embed の panel preset が分割する
+  領域 (getYoushiInnerRect) と同じ — genko-ui の :apply-preset がこれを渡す。"
+  (mm-rect->world (:inner (youshi-templates "b4manga"))))
+
+(def desk-color
+  "机(キャンバス背景)。embed のページ背景 #f0ead6 と同じクリーム。"
+  [0.94 0.918 0.84 1.0])
+(def paper-color [0.98 0.98 0.97 1.0])
+(def ^:private ruler-band-color [0.88 0.94 0.97 1.0])
+(def ^:private cb [0.55 0.78 0.92])   ; 水色 guidelines (embed CB)
+(def ^:private cg [0.7 0.7 0.7])      ; gray koma divider (embed CG)
+
+(defn- fill-rect [b color] (merge {:op :rect :mode :fan :color color} b))
+(defn- frame-rect [b color width] (merge {:op :rect :mode :loop :color color :width width} b))
+(defn- seg-op
+  "mm 座標の線分列(点ペアの flat vector)→ :segments draw op (world coords)。
+  :mode :segments は GL_LINES(点2つで独立線分1本)— 目盛り/トンボを 1 op に束ねる。"
+  [mm-pts color]
+  {:op :poly :mode :segments :color color
+   :points (mapv (fn [[x y]] (mm->world x y)) mm-pts)})
+
+(defn- ruler-tick-segs
+  "目盛り(embed tessellateYoushi §3)。4辺、`small` mm 刻み、`step` の倍数は大目盛り。
+  → {:big [...] :small [...]}(mm 点ペアの flat vector)。"
+  [w h step small]
+  (let [tick (fn [mm len horizontal?]
+               (if horizontal?
+                 [[mm 0.0] [mm len] [mm h] [mm (- h len)]]          ; top + bottom
+                 [[0.0 mm] [len mm] [w mm] [(- w len) mm]]))        ; left + right
+        gen (fn [limit horizontal?]
+              (reduce (fn [acc mm]
+                        (let [big? (zero? (mod mm step))]
+                          (update acc (if big? :big :small)
+                                  into (tick (double mm) (if big? 4.0 2.0) horizontal?))))
+                      {:big [] :small []}
+                      (range 0 (inc limit) small)))
+        xs (gen (long w) true)
+        ys (gen (long h) false)]
+    {:big (into (:big xs) (:big ys)) :small (into (:small xs) (:small ys))}))
+
+(defn- tombo-segs
+  "トンボ(embed §7)。→ {:corner [...] :cross [...]}(mm 点ペア)。:corner = 4隅の
+  L字主線(α0.5)、:cross = 4隅の十字 + 4辺中央のセンタートンボ(α0.4)。"
+  [{tl :x1 tt :y1 tr :x2 tb :y2}]
+  (let [len 10.0
+        corners [[tl tt -1.0 -1.0] [tr tt 1.0 -1.0] [tr tb 1.0 1.0] [tl tb -1.0 1.0]]
+        corner-main (mapcat (fn [[cx cy dx dy]]
+                              [[cx cy] [(- cx (* dx len)) cy]
+                               [cx cy] [cx (- cy (* dy len))]])
+                            corners)
+        corner-cross (mapcat (fn [[cx cy _ _]]
+                               [[(- cx 2.0) cy] [(+ cx 2.0) cy]
+                                [cx (- cy 2.0)] [cx (+ cy 2.0)]])
+                             corners)
+        mid-x (/ (+ tl tr) 2.0) mid-y (/ (+ tt tb) 2.0)
+        center (mapcat (fn [[cx cy dx dy]]
+                         (if (zero? dx)
+                           [[(- cx 3.0) cy] [(+ cx 3.0) cy]
+                            [cx cy] [cx (- cy (* dy len))]]
+                           [[cx (- cy 3.0)] [cx (+ cy 3.0)]
+                            [cx cy] [(- cx (* dx len)) cy]]))
+                       [[mid-x tt 0.0 -1.0] [mid-x tb 0.0 1.0]
+                        [tl mid-y -1.0 0.0] [tr mid-y 1.0 0.0]])]
+    {:corner (vec corner-main) :cross (vec (concat corner-cross center))}))
+
+(defn- center-mark-segs
+  "内枠⇔基本枠間のセンターマーク十字(embed §9)。→ mm 点ペア。"
+  [{il :x1 it :y1 ir :x2 ib :y2}]
+  (let [cx (/ (+ il ir) 2.0) cy (/ (+ it ib) 2.0)]
+    [[(- cx 3.0) (- it 4.0)] [(+ cx 3.0) (- it 4.0)] [cx (- it 7.0)] [cx (- it 1.0)]
+     [(- cx 3.0) (+ ib 4.0)] [(+ cx 3.0) (+ ib 4.0)] [cx (+ ib 1.0)] [cx (+ ib 7.0)]
+     [(- il 4.0) (- cy 3.0)] [(- il 4.0) (+ cy 3.0)] [(- il 7.0) cy] [(- il 1.0) cy]
+     [(+ ir 4.0) (- cy 3.0)] [(+ ir 4.0) (+ cy 3.0)] [(+ ir 1.0) cy] [(+ ir 7.0) cy]]))
 
 (defn youshi-draws
-  "原稿用紙(b4manga)の枠ガイド → draw-list。visible=false / type=\"none\" は空。
-   世界座標は g/youshi-outer-bounds(裁ち落とし) / g/youshi-inner-bounds(基本枠, パネル
-   プリセットが分割する対象と同じ SSoT)。"
+  "原稿用紙 template → draw-list (world coords)。genko-embed.ts tessellateYoushi の
+  忠実移植で、描画順も一致: 1 紙面(白) → 2 目盛り帯(淡水色4辺) → 3 目盛り →
+  4 裁ち落とし枠 → 5 基本枠 → 6 内枠 → 7 トンボ → 8 4コマ分割線(b4koma のみ) →
+  9 センターマーク。
+  visible=false / type=\"none\" は空(自由キャンバス)。youshi が無い(nil)・未知 type の
+  page も \"none\" と同じ空 — 旧 embed の bootstrap は必ず youshi を作るので youshi 無し
+  doc は手組み由来であり、勝手に紙を敷かないのが最小驚き(テンプレは toolbar の
+  原稿用紙 select でいつでも敷ける)。"
   [{:keys [type visible]}]
-  (if (or (false? visible) (= type "none"))
-    []
-    (let [{ox1 :x1 oy1 :y1 ox2 :x2 oy2 :y2} g/youshi-outer-bounds
-          {ix1 :x1 iy1 :y1 ix2 :x2 iy2 :y2} g/youshi-inner-bounds]
-      [{:op :rect :mode :loop :x1 ox1 :y1 oy1 :x2 ox2 :y2 oy2 :color guide :width 1}
-       {:op :rect :mode :loop :x1 ix1 :y1 iy1 :x2 ix2 :y2 iy2 :color inner-guide :width 1}])))
+  (let [{:keys [draw w-mm h-mm trim outer inner ruler-step ruler-small koma]}
+        (get youshi-templates type)]
+    (if (or (false? visible) (not draw))
+      []
+      (let [rm 15.0 ; 目盛り帯の幅 mm (embed §2)
+            ticks (ruler-tick-segs w-mm h-mm ruler-step ruler-small)
+            tombo (tombo-segs trim)
+            {il :x1 it :y1 ir :x2 ib :y2} inner]
+        (-> [;; 1. 紙面
+             (fill-rect (mm-rect->world {:x1 0.0 :y1 0.0 :x2 w-mm :y2 h-mm}) paper-color)
+             ;; 2. 目盛り帯 (淡い水色、4辺)
+             (fill-rect (mm-rect->world {:x1 0.0 :y1 0.0 :x2 w-mm :y2 rm}) ruler-band-color)
+             (fill-rect (mm-rect->world {:x1 0.0 :y1 (- h-mm rm) :x2 w-mm :y2 h-mm}) ruler-band-color)
+             (fill-rect (mm-rect->world {:x1 0.0 :y1 rm :x2 rm :y2 (- h-mm rm)}) ruler-band-color)
+             (fill-rect (mm-rect->world {:x1 (- w-mm rm) :y1 rm :x2 w-mm :y2 (- h-mm rm)}) ruler-band-color)
+             ;; 3. 目盛り (5mm 大 / 1mm 小)
+             (seg-op (:big ticks) (conj cb 0.7))
+             (seg-op (:small ticks) (conj cb 0.7))
+             ;; 4-6. 裁ち落とし枠 → 基本枠 → 内枠 (水色、細→太)
+             (frame-rect (mm-rect->world trim) (conj cb 0.6) 1)
+             (frame-rect (mm-rect->world outer) (conj cb 0.8) 1)
+             (frame-rect (mm-rect->world inner) (conj cb 0.9) 1)
+             ;; 7. トンボ (4隅 L字 + 十字、4辺中央)
+             (seg-op (:corner tombo) [0.0 0.0 0.0 0.5])
+             (seg-op (:cross tombo) [0.0 0.0 0.0 0.4])]
+            ;; 8. 4コマ分割線 (b4koma)
+            (cond->
+             koma (conj (seg-op (vec (mapcat (fn [k]
+                                               (let [ky (+ it (* (/ (- ib it) koma) k))]
+                                                 [[il ky] [ir ky]]))
+                                             (range 1 koma)))
+                                (conj cg 0.4))))
+            ;; 9. センターマーク (内枠4辺中央の外側)
+            (conj (seg-op (center-mark-segs inner) (conj cb 0.5))))))))
 
 (defn draw-list
   "nodes (serialized wrappers) → flat draw-op vector (world coords)。不可視(祖先含む,

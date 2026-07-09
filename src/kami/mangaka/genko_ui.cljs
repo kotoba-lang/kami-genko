@@ -30,6 +30,7 @@
   [:set-tool t] [:select #{nid}] [:select-node nid]
   [:set-fuki-type v] [:set-fuki-tail v] [:set-tone-pattern v]
   [:add-node node] [:add-nodes nodes] [:apply-preset k]
+  [:set-youshi-type t] [:toggle-youshi-vis]
   [:toggle-vis nid] [:reorder from-id to-id position]
   [:undo] [:redo] [:delete-selected]
   [:place-text [x y] text]
@@ -166,8 +167,10 @@
     :set-tone-pattern (assoc db :tone-pattern (first args))
     :add-node         (add-nodes* db [(first args)])
     :add-nodes        (add-nodes* db (first args))
+    ;; パネルプリセットが分割するのは原稿用紙の内枠(テキスト安全域)— embed の
+    ;; getYoushiInnerRect と同じ(gr/youshi-safe-bounds、mm 由来の world 座標)。
     :apply-preset     (add-nodes* db (mapv #(g/panel-node (g/gen-nid) %)
-                                           (g/panel-preset-rects (first args) g/youshi-inner-bounds)))
+                                           (g/panel-preset-rects (first args) gr/youshi-safe-bounds)))
     :toggle-vis       (-> (push-undo db)
                           (update-in [:doc :pages (active-idx db) :nodes] g/toggle-node-visible (first args)))
     :reorder          (let [[from to position] args]
@@ -180,6 +183,17 @@
                         (if (seq text)
                           (add-nodes* db [(g/text-node (g/gen-nid) {:x x :y y :text text})])
                           db))
+    ;; 原稿用紙 (youshi): template 切替 / 表示トグル。youshi は page 直下の特別
+    ;; ノード({:id :type :visible})で :nodes には入らない — embed の youshiType/
+    ;; youshiVis op と同じ語彙。youshi が無い page でも set-youshi-type は
+    ;; ノードを作って敷ける(手組み doc の救済)。
+    :set-youshi-type  (-> (push-undo db)
+                          (update-in [:doc :pages (active-idx db) :youshi]
+                                     (fn [y] (g/youshi (or (:id y) (g/gen-nid))
+                                                       (first args)
+                                                       (not (false? (:visible y)))))))
+    :toggle-youshi-vis (-> (push-undo db)
+                           (update-in [:doc :pages (active-idx db) :youshi :visible] false?))
     :pointer-down     (pointer-down db (first args))
     :pointer-move     (pointer-move db (first args))
     :pointer-up       (pointer-up db)
@@ -191,6 +205,7 @@
 
 (def ^:private doc-ops
   #{:add-node :add-nodes :apply-preset :toggle-vis :reorder
+    :set-youshi-type :toggle-youshi-vis
     :undo :redo :delete-selected :place-text :pointer-up :set-doc})
 
 (defn doc-action?
@@ -296,12 +311,14 @@
     []))
 
 (defn- gl-mode
-  "draw op の :mode → GL 描画プリミティブ(:strip/:fan=塗り, :loop/:line=線; 既定 :line)。"
+  "draw op の :mode → GL 描画プリミティブ(:strip/:fan=塗り, :loop/:line=線,
+  :segments=独立線分群(点2つで1本; 原稿用紙の目盛り/トンボ); 既定 :line)。"
   [gl mode]
   (case mode
-    :strip (.-TRIANGLE_STRIP gl)
-    :fan   (.-TRIANGLE_FAN gl)
-    :loop  (.-LINE_LOOP gl)
+    :strip    (.-TRIANGLE_STRIP gl)
+    :fan      (.-TRIANGLE_FAN gl)
+    :loop     (.-LINE_LOOP gl)
+    :segments (.-LINES gl)
     (.-LINE_STRIP gl)))
 
 (defn- draw-op! [gl coll W H vp {:keys [color mode] :as o}]
@@ -329,7 +346,7 @@
           draws (into (gr/youshi-draws youshi) (gr/draw-list (active-nodes db) (:selection db)))
           draft (:draft db)]
       (.viewport gl 0 0 W H) ; GL viewport(描画先ピクセル範囲) — 編集用 pan/zoom の vp とは別物
-      (.clearColor gl 0.94 0.918 0.84 1.0) ; cream
+      (let [[dr dg dbv da] gr/desk-color] (.clearColor gl dr dg dbv da)) ; 机 = クリーム(紙面とは別色)
       (.clear gl (.-COLOR_BUFFER_BIT gl))
       (doseq [o draws] (draw-op! gl coll W H vp o))
       (when draft (draw-op! gl coll W H vp (assoc draft :mode (draft-mode draft)))))))
@@ -412,6 +429,14 @@
                    :style {:padding "4px 8px" :border-radius "6px" :cursor "pointer"
                            :background (if (= t (:tool db)) "#e06090" "#333") :color "#fff" :border "none"}}
           t])
+       ;; 原稿用紙 template (embed の youshiType select と同じ選択肢/表記)
+       [:select {:value (or (get-in db [:doc :pages (active-idx db) :youshi :type]) "none")
+                 :title "原稿用紙"
+                 :on-change #(dispatch! [:set-youshi-type (.. % -target -value)])
+                 :style {:padding "4px" :border-radius "6px"}}
+        [:option {:value "b4manga"} "B4 漫画"]
+        [:option {:value "b4koma"} "4コマ"]
+        [:option {:value "none"} "Free"]]
        [:select {:value "" :title "コマ割りプリセット"
                  :on-change (fn [e]
                               (let [v (.. e -target -value)]
@@ -471,10 +496,22 @@
   [{:keys [db* dispatch!]}]
   (let [db @db*]
     (when db
-      (let [rows (g/all-nodes (active-nodes db))]
+      (let [rows (g/all-nodes (active-nodes db))
+            youshi (get-in db [:doc :pages (active-idx db) :youshi])]
         [:div {:style {:width "200px" :padding "6px" :font "12px sans-serif" :overflow "auto"
                        :border-right "1px solid #ccc" :background "#faf7f0"}}
          [:div {:style {:font-weight "bold" :margin-bottom "4px"}} "Nodes"]
+         ;; 原稿用紙は page 直下の特別ノード — embed の node tree と同じく
+         ;; `genkouyoushi (<type>)` の行を先頭に出す(眼アイコンで表示トグル)。
+         (when youshi
+           (let [vis? (not (false? (:visible youshi)))]
+             [:div {:style {:padding "2px 4px" :border-radius "4px"
+                            :display "flex" :align-items "center" :gap "4px"
+                            :opacity (if vis? 1 0.4)}}
+              [:span {:on-click #(dispatch! [:toggle-youshi-vis])
+                      :style {:cursor "pointer"}
+                      :title "表示/非表示"} (if vis? "👁" "🚫")]
+              [:span (str "genkouyoushi (" (or (:type youshi) "none") ")")]]))
          (for [row rows]
            ^{:key (:nid row)}
            [:div {:draggable true
