@@ -98,6 +98,76 @@
           alphas (mapv #(last (:color %)) draws)]
       (is (apply >= alphas)))))
 
+(deftest youshi-template-geometry
+  (testing "mm スペックは genko-embed.ts YOUSHI と一致(B4 257×364、裁ち落とし/基本枠/内枠)"
+    (let [{:keys [w-mm h-mm trim outer inner koma]} (get gr/youshi-templates "b4manga")]
+      (is (= [257.0 364.0] [w-mm h-mm]))
+      (is (= {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0} trim))
+      (is (= {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0} outer))
+      (is (= {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0} inner))
+      (is (nil? koma)))
+    (is (= 4 (:koma (get gr/youshi-templates "b4koma"))))
+    (is (false? (:draw (get gr/youshi-templates "none")))))
+  (testing "world 変換: 紙面は B4 比率を保ち、y 20..700 の帯に x=500 中央寄せ"
+    (let [{:keys [x1 y1 x2 y2]} gr/youshi-paper-bounds
+          aspect (/ (- x2 x1) (- y2 y1))]
+      (is (< (Math/abs (- aspect (/ 257.0 364.0))) 1e-9) "B4 縦横比")
+      (is (< (Math/abs (- y1 20.0)) 1e-9))
+      (is (< (Math/abs (- y2 700.0)) 1e-9))
+      (is (< (Math/abs (- (/ (+ x1 x2) 2.0) 500.0)) 1e-9) "x 中央 = 500")))
+  (testing "内枠(safe)はパネルプリセットの分割対象(150×220mm)"
+    (let [{:keys [x1 y1 x2 y2]} gr/youshi-safe-bounds]
+      (is (< (Math/abs (- (- x2 x1) (* 150.0 gr/youshi-px-per-mm))) 1e-9))
+      (is (< (Math/abs (- (- y2 y1) (* 220.0 gr/youshi-px-per-mm))) 1e-9)))
+    (is (= [gr/youshi-safe-bounds] (g/panel-preset-rects "1" gr/youshi-safe-bounds 0)))))
+
+(deftest youshi-template-draws
+  (let [draws (gr/youshi-draws {:type "b4manga" :visible true})]
+    (testing "描画順は embed tessellateYoushi と同じ: 紙面 → 目盛り帯×4 → 目盛り →
+              枠×3 → トンボ → センターマーク"
+      (is (= [:fan :fan :fan :fan :fan            ; 紙面 + 目盛り帯4辺
+              :segments :segments                  ; 目盛り 大/小
+              :loop :loop :loop                    ; 裁ち落とし/基本/内枠
+              :segments :segments                  ; トンボ 主線/十字
+              :segments]                           ; センターマーク
+             (mapv :mode draws))))
+    (testing "紙面は白系の塗り、枠は水色系の hairline loop"
+      (let [paper (first draws)]
+        (is (= :rect (:op paper)))
+        (is (= gr/paper-color (:color paper)))
+        (is (= gr/youshi-paper-bounds (select-keys paper [:x1 :y1 :x2 :y2]))))
+      (let [[trim outer inner] (filterv #(= :loop (:mode %)) draws)]
+        (is (= gr/youshi-trim-bounds (select-keys trim [:x1 :y1 :x2 :y2])))
+        (is (= gr/youshi-frame-bounds (select-keys outer [:x1 :y1 :x2 :y2])))
+        (is (= gr/youshi-safe-bounds (select-keys inner [:x1 :y1 :x2 :y2])))
+        (is (< (last (:color trim)) (last (:color outer)) (last (:color inner)))
+            "枠の α は 裁ち落とし < 基本枠 < 内枠 (0.6/0.8/0.9)")))
+    (testing "目盛りは 1mm 刻み・5mm 大目盛り(点ペア = 偶数個)"
+      (let [[big small] (filterv #(= :segments (:mode %)) draws)
+            ;; 大目盛り: x 0..257 の 5 の倍数 52本 ×2辺 + y 0..364 の 73本 ×2辺
+            n-big (* 2 (+ 52 73))]
+        (is (= (* 2 n-big) (count (:points big))))
+        (is (even? (count (:points small))))))
+    (testing "トンボは黒、センターマークは水色"
+      (let [segs (filterv #(= :segments (:mode %)) draws)
+            [tombo-main tombo-cross center] (drop 2 segs)]
+        (is (= [0.0 0.0 0.0 0.5] (:color tombo-main)))
+        (is (= [0.0 0.0 0.0 0.4] (:color tombo-cross)))
+        (is (= 16 (count (:points tombo-main))) "4隅 × L字2本")
+        (is (= 16 (count (:points center))) "内枠4辺中央の十字"))))
+  (testing "b4koma は b4manga + 4コマ分割線(3本)"
+    (let [manga (gr/youshi-draws {:type "b4manga" :visible true})
+          koma (gr/youshi-draws {:type "b4koma" :visible true})]
+      (is (= (inc (count manga)) (count koma)))
+      (let [div (nth koma (dec (dec (count koma))))] ; センターマークの直前
+        (is (= :segments (:mode div)))
+        (is (= 6 (count (:points div))) "水平線3本 = 6点"))))
+  (testing "none / 非表示 / youshi 無し(nil)・未知 type は空(自由キャンバス)"
+    (is (= [] (gr/youshi-draws {:type "none" :visible true})))
+    (is (= [] (gr/youshi-draws {:type "b4manga" :visible false})))
+    (is (= [] (gr/youshi-draws nil)))
+    (is (= [] (gr/youshi-draws {:type "a4wat" :visible true})))))
+
 (deftest node-draws-modes
   (testing "panel は :rect :mode :loop"
     (is (= [:rect :loop] ((juxt :op :mode) (first (gr/node->draws (g/panel-node "n1" {:x1 0 :y1 0 :x2 10 :y2 10})))))))
