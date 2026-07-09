@@ -53,6 +53,11 @@
 (defn ^:export wouldCycle [nodes child-id parent-id]
   (g/would-cycle? (<-js nodes) child-id parent-id))
 (defn ^:export nodeVisible [nodes id] (g/node-visible? (<-js nodes) id))
+(defn ^:export nodeVisibleMap
+  "全 node の実効可視を一括で JS object {nid: bool} に。host の render loop
+  (genko-embed.ts tessellateAll) が毎フレーム per-node で nodeVisible を呼ぶ代わりに
+  1 変換で参照する bulk API。"
+  [nodes] (clj->js (g/visible-map (<-js nodes))))
 (defn ^:export setNodeParent [nodes child-id parent-id]
   (->js (g/set-node-parent (<-js nodes) child-id parent-id)))
 (defn ^:export reorderNodes [nodes from-id to-id position]
@@ -97,7 +102,8 @@
 (def ^:export api
   #js {:readDoc readDoc :writeDoc writeDoc :normalize normalize :validDoc validDoc
        :allNodes allNodes :findByNid findByNid :wouldCycle wouldCycle
-       :nodeVisible nodeVisible :setNodeParent setNodeParent :reorderNodes reorderNodes
+       :nodeVisible nodeVisible :nodeVisibleMap nodeVisibleMap
+       :setNodeParent setNodeParent :reorderNodes reorderNodes
        :nodeTree nodeTree :recordOp recordOp :replayOplog replayOplog
        :pageToStoryboard pageToStoryboard :docToStoryboards docToStoryboards
        :editor editor})

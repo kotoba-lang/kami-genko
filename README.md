@@ -31,8 +31,9 @@ node -e 'globalThis.window=globalThis;require("./dist/kami-genko.js");console.lo
 ```
 
 `KamiGenko` API: `readDoc / writeDoc / normalize / allNodes / findByNid / wouldCycle /
-nodeVisible / setNodeParent / reorderNodes / nodeTree / recordOp / replayOplog /
-pageToStoryboard / docToStoryboards`。境界で JS(JSON)⇄clj を変換し verbatim round-trip。
+nodeVisible / nodeVisibleMap / setNodeParent / reorderNodes / nodeTree / recordOp /
+replayOplog / pageToStoryboard / docToStoryboards`。境界で JS(JSON)⇄clj を変換し
+verbatim round-trip。`nodeVisibleMap` は render loop 用の一括可視判定 {nid: bool}。
 
 ## 忠実点 / expression 語彙の共有
 

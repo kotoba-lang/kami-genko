@@ -51,6 +51,34 @@
         (is (= ["s" 0] [(:kind (b2 "s0")) (:idx (b2 "s0"))]) "stroke は kind s, idx 0")
         (is (= ["o" 0] [(:kind (b2 "n1")) (:idx (b2 "n1"))]) "overlay idx は stroke と独立")))))
 
+(deftest inline-js-fidelity
+  (testing "parent-of: _parent が空文字列なら _layer へフォールバック (JS の ||)"
+    (is (= "n9" (g/parent-of {:id "x" :data {:_parent "" :_layer "n9"}})))
+    (is (= "n9" (g/parent-of {:id "x" :data {:_layer "n9"}})))
+    (is (= "" (g/parent-of {:id "x" :data {}}))))
+  (testing "node-name: 空文字列は JS では falsy"
+    (let [nm (fn [t data] (:nm (first (g/all-nodes [(g/wrap-node "x" t data)]))))]
+      (is (= "AI Image" (nm "ai-image" {:_genPrompt ""})))
+      (is (= "AI Image (abc)" (nm "ai-image" {:_genPrompt "abc"})))
+      (is (= "T" (nm "link" {:linkTitle "" :text "T"})))
+      (is (= "Link" (nm "link" {:linkTitle "" :text ""})))
+      (is (= "Group" (nm "group" {:groupName ""})))
+      (is (= "Panel 1" (nm "panel" {:panelName ""})))))
+  (testing "all-nodes: stroke の連番は per-kind index (interleave しても strokes 配列基準)"
+    (let [rows (g/all-nodes [(g/panel-node "p" {:x1 0 :y1 0 :x2 1 :y2 1})
+                             (g/wrap-node "s0" "stroke" {:points []})])]
+      (is (= "Stroke 1" (:nm (second rows))))))
+  (testing "all-nodes: par が \"\" の node は nid \"\" の node の子と数えない (JS の n.par&&)"
+    (let [rows (g/all-nodes [(g/wrap-node "" "group" {:groupName "g"})
+                             (g/wrap-node "a" "text" {:text "t"})])]
+      (is (not-any? :has-children rows))))
+  (testing "visible-map: node-visible? の一括版"
+    (let [hidden (mapv #(if (= "n1" (g/nid-of %)) (assoc % :visible false) %) snodes)
+          vm (g/visible-map hidden)]
+      (is (false? (vm "n3")) "祖先が不可視なら子孫も不可視")
+      (is (false? (vm "n1")))
+      (is (every? true? (vals (g/visible-map snodes)))))))
+
 (deftest tree-and-cycle
   (is (g/would-cycle? snodes "n1" "n3") "n1 を n3 の下 → 循環")
   (is (not (g/would-cycle? snodes "n3" "n1")) "n3 を n1 直下 → 循環しない")
@@ -125,6 +153,14 @@
           p0 (:nodes (first (:pages doc)))]
       (is (nil? (g/find-by-nid p0 "o1")))
       (is (= "" (g/parent-of (g/find-by-nid p0 "o2"))) "孤児の親は空に")))
+  (testing "replay は inline JS と同じく data へ :type/:_parent/:_layer を注入しない"
+    (let [doc (g/replay-oplog [{:type "stroke"   :data {:stroke {:_nid "s1" :points []}}}
+                               {:type "reparent" :data {:childNid "s1" :parentNid "o9"}}])
+          s1 (g/find-by-nid (:nodes (first (:pages doc))) "s1")]
+      (is (= #{:points :_nid :_visible :_parent} (set (keys (:data s1))))
+          "stroke data は payload + _nid/_visible(追加) + _parent(reparent) のみ")
+      (is (not (contains? (:data s1) :_layer)) "inline replay reparent は _layer を書かない")
+      (is (= "o9" (g/parent-of s1)))))
   (testing "undo/redo は最後の stroke を出し入れ"
     (let [base [{:type "stroke" :data {:stroke {:_nid "s1" :points []}}}
                 {:type "stroke" :data {:stroke {:_nid "s2" :points []}}}]

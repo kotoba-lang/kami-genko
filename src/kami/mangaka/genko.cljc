@@ -170,7 +170,13 @@
 (defn self-visible?
   "この node 自身の可視 (`!==false`)。祖先は見ない。"
   [n] (not (or (false? (:visible n)) (false? (get-in n [:data :_visible])))))
-(defn parent-of [n] (or (get-in n [:data :_parent]) (get-in n [:data :_layer]) ""))
+(defn parent-of
+  "親 nid。genko-embed.ts の `o._parent||o._layer||''` に忠実 — JS では \"\" が falsy
+  なので、:_parent が空文字列でも :_layer へフォールバックする (nil だけでなく)。"
+  [n]
+  (or (not-empty (get-in n [:data :_parent]))
+      (not-empty (get-in n [:data :_layer]))
+      ""))
 
 (defn- set-parent* [n pid]
   (-> n (assoc-in [:data :_parent] pid) (assoc-in [:data :_layer] pid)))
@@ -186,13 +192,14 @@
 (defn- node-name [n panel-count]
   (let [d (node-data n)]
     (case (type-of n)
-      "panel"    (str "Panel " (or (:panelName d) panel-count))
-      "ai-image" (str "AI Image" (when-let [p (:_genPrompt d)] (str " (" (subs p 0 (min 12 (count p))) ")")))
-      "ai-desc"  (str "AI Desc"  (when-let [p (:_genPrompt d)] (str " (" (subs p 0 (min 12 (count p))) ")")))
+      ;; JS の `x?…:''` / `a||b` は空文字列も falsy — not-empty で忠実に再現する。
+      "panel"    (str "Panel " (let [p (:panelName d)] (if (or (nil? p) (= p "")) panel-count p)))
+      "ai-image" (str "AI Image" (when-let [p (not-empty (:_genPrompt d))] (str " (" (subs p 0 (min 12 (count p))) ")")))
+      "ai-desc"  (str "AI Desc"  (when-let [p (not-empty (:_genPrompt d))] (str " (" (subs p 0 (min 12 (count p))) ")")))
       "prompt"   (str "Prompt: " (subs (str (:prompt d)) 0 (min 16 (count (str (:prompt d))))))
       "text"     (str "Text: " (subs (str (:text d)) 0 (min 8 (count (str (:text d))))))
-      "link"     (or (:linkTitle d) (:text d) "Link")
-      "group"    (or (:groupName d) "Group")
+      "link"     (or (not-empty (:linkTitle d)) (not-empty (:text d)) "Link")
+      "group"    (or (not-empty (:groupName d)) "Group")
       "tone"     "Tone"
       "fukidashi" "Fukidashi"
       "stroke"   nil        ; stroke name handled by caller (index-based)
@@ -211,18 +218,22 @@
                            stroke? (= t "stroke")
                            kind (if stroke? "s" "o")
                            idx  (if stroke? (swap! sc inc) (swap! oc inc))
+                           ;; inline JS: strokes.forEach((s,i)=>… 'Stroke '+(i+1)) — stroke の
+                           ;; 連番は per-kind index (strokes 配列内の位置)。strokes-then-overlays
+                           ;; 順の入力では gi と一致するが、interleave された :nodes でも忠実に。
                            nm (if stroke?
-                                (str "Stroke " (inc gi))
+                                (str "Stroke " (inc idx))
                                 (do (when (= t "panel") (swap! pc inc))
                                     (node-name n @pc)))]
                        {:gi gi :nid (nid-of n) :par (parent-of n) :vis (self-visible? n)
                         :type t :kind kind :idx idx :nm nm :ref n :agent (agent-of n)
                         :has-children false}))
-                   nodes))
-        ids (set (map :nid base))]
+                   nodes))]
+    ;; inline JS: `if(n.par&&nids.has(n.par))…` — par が "" (falsy) の node は誰の子でも
+    ;; ないので、nid が "" の node を has-children にしない (par 非空を要求)。
     (mapv (fn [row]
             (assoc row :has-children
-                   (boolean (some #(and (= (:nid row) (:par %)) (contains? ids (:par %))) base))))
+                   (boolean (some #(and (seq (:par %)) (= (:nid row) (:par %))) base))))
           base)))
 
 (defn would-cycle?
@@ -248,6 +259,13 @@
               (cond (nil? n) true
                     (not (self-visible? n)) false
                     :else (recur (parent-of n) (conj seen cur)))))))
+
+(defn visible-map
+  "全 node の実効可視 (node-visible?) を一括計算した {nid bool}。host の render loop
+  (genko-embed.ts tessellateAll 等) が毎フレーム per-node で問い合わせる代わりに、
+  1 回の変換で参照できる bulk API。"
+  [nodes]
+  (into {} (map (fn [n] (let [id (nid-of n)] [id (node-visible? nodes id)]))) nodes))
 
 (defn- replace-node [nodes id f]
   (mapv #(if (= id (nid-of %)) (f %) %) nodes))
@@ -355,6 +373,20 @@
          v (conj (vec oplog) op)]
      (if (> (count v) 5000) (vec (take-last 5000 v)) v))))
 
+(defn- replay-wrap
+  "inline replayOplog の忠実 wrapper 化 (stroke/addOverlay): `_nid`(無ければ呼び手が
+  生成) と `_visible=true` だけを data に書く — wrap-node と違い :type/:_parent/:_layer
+  を data に注入しない (inline JS は payload をそのまま push し rSavePage で包むだけ)。"
+  [id type data]
+  {:id id :type type :visible true :data (assoc data :_nid id :_visible true)})
+
+(defn- replay-wrap-as-is
+  "addGroup/panelPreset の忠実 wrapper 化: inline JS は overlay payload を一切変更せず
+  push する (id は `o._nid||''` — nid 生成もしない、visible は `_visible!==false`)。"
+  [type-default o]
+  {:id (or (:_nid o) "") :type (or (:type o) type-default)
+   :visible (not (false? (:_visible o))) :data o})
+
 (defn- rp-update-nodes [doc f]
   (update-in doc [:pages (:activePageIdx doc) :nodes] (fnil f [])))
 
@@ -368,7 +400,14 @@
   "genko replayOplog 相当: ops から新しい doc を純粋に再構築する。`base` は
   name/docId の引き継ぎ元と初期 page/youshi id を供給する(省略時 gen-nid)。
   注: aiGenImage/aiGenDesc/scaleNode は op に payload が無く決定的に再現できないため
-  genko と同じく no-op。"
+  genko と同じく no-op。
+
+  既知の意図的乖離 (inline replayOplog に対して):
+  - node の並び: inline は strokes/overlays を別配列で持ち rSavePage で
+    strokes→overlays 順に直列化するが、本実装は op 順の単一 :nodes vector
+    (kind 内の相対順は一致し、loadPage 相当の投影後は同一挙動)。
+  - deletePage/switchPage: inline の rLoadPage は splice 直後に旧 index へ
+    rSavePage する（作業配列を別ページに書き込みうる既知バグ）— これは再現しない。"
   ([ops] (replay-oplog ops {}))
   ([ops {:keys [name docId page-id youshi-id]}]
    (let [fresh {:name (or name "") :docId docId
@@ -382,27 +421,33 @@
            (case t
              "stroke"     (if-let [s (:stroke d)]
                             (let [id (or (:_nid s) (gen-nid))]
-                              (assoc (nodes-> #(conj % (wrap-node id "stroke" s (or (:_parent s) ""))))
+                              (assoc (nodes-> #(conj % (replay-wrap id "stroke" s)))
                                      :redo []))
                             st)
              "addOverlay" (if-let [o (:overlay d)]
-                            (nodes-> #(conj % (wrap-node (or (:_nid o) (gen-nid)) (:type o) o (or (:_parent o) ""))))
+                            (nodes-> #(conj % (replay-wrap (or (:_nid o) (gen-nid)) (:type o) o)))
                             st)
              "addGroup"   (if-let [o (:overlay d)]
-                            (nodes-> #(conj % (wrap-node (or (:_nid o) (gen-nid)) (or (:type o) "group") o (or (:_parent o) ""))))
+                            (nodes-> #(conj % (replay-wrap-as-is "group" o)))
                             st)
              "panelPreset" (if-let [ps (:panels d)]
-                             (nodes-> #(into % (map (fn [o] (wrap-node (or (:_nid o) (gen-nid)) (or (:type o) "panel") o (or (:_parent o) ""))) ps)))
+                             (nodes-> #(into % (map (partial replay-wrap-as-is "panel") ps)))
                              st)
+             ;; inline replay の deleteNode は `_parent===dnid` だけを見て `_parent=''` に
+             ;; する (:_layer は見ない・触らない — live 側 deleteNode とは非対称だが忠実に)。
              "deleteNode" (nodes-> (fn [ns]
                                      (->> ns
-                                          (mapv #(if (= (:nid d) (parent-of %)) (set-parent* % "") %))
+                                          (mapv #(if (= (:nid d) (get-in % [:data :_parent]))
+                                                   (assoc-in % [:data :_parent] "") %))
                                           (filterv #(not= (:nid d) (nid-of %))))))
              "moveNode"   (if (and (:nid d) (some? (:dx d)))
                             (nodes-> (fn [ns] (replace-node ns (:nid d) #(update % :data move-data (:dx d) (:dy d)))))
                             st)
+             ;; inline replay の reparent は `n._parent=…` のみ (:_layer は書かない —
+             ;; live 側 setParent が両方書くのと非対称だが忠実に)。
              "reparent"   (if (some? (:childNid d))
-                            (nodes-> (fn [ns] (replace-node ns (:childNid d) #(set-parent* % (or (:parentNid d) "")))))
+                            (nodes-> (fn [ns] (replace-node ns (:childNid d)
+                                                            #(assoc-in % [:data :_parent] (or (:parentNid d) "")))))
                             st)
              "toggleVis"  (nodes-> #(toggle-node-visible % (:nid d)))
              "youshiVis"  (assoc st :doc (update-in doc [:pages (:activePageIdx doc) :youshi :visible] not))
