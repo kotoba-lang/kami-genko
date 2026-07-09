@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "shadow-cljs release genko",
-    "test:kotobase": "shadow-cljs compile kotobase-test && node out/kotobase-tests.js"
+    "test:kotobase": "shadow-cljs compile kotobase-test && node out/kotobase-tests.js",
+    "test:genko-query": "shadow-cljs compile genko-query-test && node out/genko-query-tests.js"
   },
   "devDependencies": {
     "shadow-cljs": "2.28.20"
