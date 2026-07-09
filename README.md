@@ -46,7 +46,7 @@ verbatim round-trip。`nodeVisibleMap` は render loop 用の一括可視判定 
 
 ```bash
 clojure -M:test              # model / node-tree / cycle / visibility / reorder / JSON round-trip / oplog replay / bridge
-npm run test:kotobase        # vendored kotobase.{cid,cacao,client} の node cljs.test(下記)
+npm run test:kotobase        # kotoba-lang/kotobase-client(deps.edn git dep)経由の node cljs.test(下記)
 ```
 
 ## cljs-only genko エディタ (`kami.mangaka.genko-app`)
@@ -57,8 +57,10 @@ kotoba-server(kotobase.net) への永続を任意同期(「☁ save」/「☁ lo
 
 - **識別**: actor(ブラウザ)ごとに Ed25519 鍵(`localStorage` の `genko/kotoba-identity`,
   ブラウザはファイルを書けないため JVM 版 `.actor/identity.edn` の等価物)を生成し、
-  did:key を自己発行 CACAO(SIWE/CAIP-122, DAG-CBOR)で認証する
-  (`src/kotobase/{cid,cacao,client}.cljc`, `kotobase-client` からの vendor)。
+  did:key を自己発行 CACAO(SIWE/CAIP-122, DAG-CBOR、`:auth-profile :apex` 既定)で
+  認証する(`kotobase.{cid,cacao,client}` — `kotoba-lang/kotobase-client` への
+  deps.edn git dep。旧 `src/kotobase/*.cljs` vendored copy は 2026-07-09 apex 401
+  修正を機に削除)。
 - **既定の自動保存は localStorage のまま**(信頼性優先、ネットワーク往復をキー入力の
   たびに走らせない)。kotoba-server 同期は明示ボタン操作。
 - graph アドレスは `kotobase/db/<did>/<db-name>` の CID(AT Protocol の `at://` では
