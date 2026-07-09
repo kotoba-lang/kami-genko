@@ -1,0 +1,530 @@
+(ns kami.mangaka.genko-ui
+  "Reusable genko editor UI — reagent components + pure state transitions with
+  an injectable state adapter (ADR-2607091300 follow-up: aozora native mount).
+
+  genko-app.cljs のスタンドアロン editor から UI をライブラリ化したもの。
+  components は module-level ratom を触らず、adapter 経由で state を読み・
+  action を発行する。host は ratom(スタンドアロン genko-app)でも re-frame
+  (app-aozora /studio/<slug>/genko)でも同じ components を使える。
+
+  ── adapter contract ─────────────────────────────────────────────────────────
+  {:db*       IDeref   ; *reactive* deref → editor db (ratom / cursor / reaction /
+                       ;  re-frame subscription)。components と GL 再描画 reaction が
+                       ;  deref する。
+   :dispatch! (fn [action]) ; action = data vector (下記 `step` の語彙)。host は
+                       ;  ratom なら (swap! state step action)、re-frame なら
+                       ;  (rf/dispatch-sync [:genko/act action]) 等で適用する。
+   :sync      (optional) ; クラウド同期ボタン(☁ save/load)を toolbar に出す
+              {:save! (fn []) :load! (fn []) :title str}
+              ; nil/省略 = 非表示 (aozora は PDS follow-up まで繋がない)。
+   :prompt-fn (optional (fn [label default] -> str|nil)) ; text ツールの入力。
+              ; 省略時 js/window.prompt}
+
+  ── editor db shape (`initial-db`) ──────────────────────────────────────────
+  {:doc <genko doc (kami.mangaka.genko)> :undo-stack [] :redo-stack []
+   :tool str :selection #{nid} :draft nil
+   :fuki-type str :fuki-tail str :tone-pattern str
+   :viewport {:x :y :zoom} :pan-from nil :kotoba-status nil}
+
+  ── actions (`step` = pure (editor-db, action) -> editor-db) ─────────────────
+  [:set-tool t] [:select #{nid}] [:select-node nid]
+  [:set-fuki-type v] [:set-fuki-tail v] [:set-tone-pattern v]
+  [:add-node node] [:add-nodes nodes] [:apply-preset k]
+  [:toggle-vis nid] [:reorder from-id to-id position]
+  [:undo] [:redo] [:delete-selected]
+  [:place-text [x y] text]
+  [:pointer-down {:screen [sx sy] :pressure p}]
+  [:pointer-move {:screen [sx sy] :pressure p}]
+  [:pointer-up]
+  [:wheel-zoom {:screen [sx sy] :delta-y dy}] [:reset-viewport]
+  [:set-doc doc]  ; import/load — selection と undo/redo stack をリセット
+
+  doc を変え永続化が必要な action は `doc-action?` が true(host が autosave を
+  スケジュールする判定に使う)。"
+  (:require [reagent.core :as r]
+            [reagent.ratom :as ratom]
+            [kami.mangaka.genko :as g]
+            [kami.mangaka.genko-render :as gr]
+            [kotoba.editor :as ed]
+            [canvaskit.hit-test :as ckht]))
+
+;; ── editor db ────────────────────────────────────────────────────────────────
+
+(defn initial-db
+  "editor db 初期値。doc 省略時は空 doc \"Mangaka\"。"
+  ([] (initial-db (g/new-doc "Mangaka" {:page-id (g/gen-nid) :youshi-id (g/gen-nid)})))
+  ([doc]
+   {:doc doc :undo-stack [] :redo-stack []
+    :tool "draw" :selection #{} :draft nil
+    :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"
+    :viewport gr/default-viewport :pan-from nil :kotoba-status nil}))
+
+(defn- snap [db] (ed/snapshot db [:doc]))
+(defn active-idx [db] (get-in db [:doc :activePageIdx] 0))
+(defn active-nodes [db] (get-in db [:doc :pages (active-idx db) :nodes] []))
+(defn- push-undo [db] (ed/push-undo db (snap db) ed/default-history-limit))
+
+(defn- add-nodes* [db nodes]
+  (if (seq nodes)
+    (-> (push-undo db)
+        (update-in [:doc :pages (active-idx db) :nodes] (fnil into []) (vec nodes)))
+    db))
+
+(defn- hit-test
+  "world 点に当たる最前面 node の nid。canvaskit.hit-test へ委譲(ADR-2607071130):
+  全 node 同 z なので「後勝ち(subviews 順)」= 旧 reverse+some と同じ順序。"
+  [db world-pt]
+  (:nid (ckht/hit-test
+         (keep (fn [n]
+                 (let [{:keys [x1 y1 x2 y2]} (g/node-data n)]
+                   (when x1
+                     {:frame [(min x1 x2) (min y1 y2) (abs (- x2 x1)) (abs (- y2 y1))]
+                      :nid (g/nid-of n)})))
+               (active-nodes db))
+         world-pt)))
+
+;; ── pointer transitions (pure) ───────────────────────────────────────────────
+;; select ツールで空白をドラッグしたら pan(freeboard.board と同じ UX)。ドラッグ中の
+;; 増分は screen 座標のまま gr/pan-viewport に渡す(pan は screen delta 引数)。
+
+(defn- pointer-down [db {:keys [screen pressure]}]
+  (let [[sx sy] screen
+        p (or pressure 0.6)
+        [x y] (gr/screen->world (:viewport db) [sx sy])]
+    (case (:tool db)
+      "select" (if-let [nid (hit-test db [x y])]
+                 (assoc db :selection #{nid})
+                 (assoc db :selection #{} :pan-from [sx sy]))
+      "draw"   (assoc db :draft {:op :poly :points [[x y p]] :color gr/ink :size 4 :_kind "stroke"})
+      "panel"  (assoc db :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "panel"})
+      "fukidashi" (assoc db :draft {:op :ellipse :x1 x :y1 y :x2 x :y2 y :color gr/ink :_kind "fukidashi"})
+      "tone"   (assoc db :draft {:op :rect :x1 x :y1 y :x2 x :y2 y :color [0.5 0.5 0.5 0.6] :_kind "tone"})
+      ;; "text" は host が prompt して [:place-text …] を発行する(step は純のまま)
+      db)))
+
+(defn- pointer-move [db {:keys [screen pressure]}]
+  (let [[sx sy] screen
+        p (or pressure 0.6)]
+    (cond
+      (:pan-from db)
+      (let [[lx ly] (:pan-from db)]
+        (-> db
+            (update :viewport gr/pan-viewport (- sx lx) (- sy ly))
+            (assoc :pan-from [sx sy])))
+      (:draft db)
+      (let [[x y] (gr/screen->world (:viewport db) [sx sy])]
+        (update db :draft
+                (fn [d] (if (= :poly (:op d)) (update d :points conj [x y p]) (assoc d :x2 x :y2 y)))))
+      :else db)))
+
+(defn- draft->node [db {:keys [_kind] :as d}]
+  (let [id (g/gen-nid)]
+    (case _kind
+      "stroke" (g/wrap-node id "stroke" {:points (mapv (fn [[x y p]] {:x x :y y :p p}) (:points d))
+                                         :color (:color d) :size (:size d)})
+      "panel"  (g/panel-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d)})
+      "fukidashi" (g/fukidashi-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d)
+                                        :fukiType (:fuki-type db) :fukiTail (:fuki-tail db)})
+      "tone"   (g/tone-node id {:x1 (:x1 d) :y1 (:y1 d) :x2 (:x2 d) :y2 (:y2 d)
+                                :tonePattern (:tone-pattern db)})
+      nil)))
+
+(defn- pointer-up [db]
+  (let [db (assoc db :pan-from nil)]
+    (if-let [d (:draft db)]
+      (let [node (draft->node db d)
+            db (assoc db :draft nil)]
+        (if node (add-nodes* db [node]) db))
+      db)))
+
+(defn- wheel-zoom [db {:keys [screen delta-y]}]
+  (let [vp (:viewport db)
+        factor (if (neg? delta-y) 1.1 (/ 1.0 1.1))]
+    (update db :viewport gr/zoom-viewport (* (:zoom vp) factor) screen)))
+
+(defn- delete-selected [db]
+  (let [sel (:selection db)]
+    (if (seq sel)
+      (-> (push-undo db)
+          (update-in [:doc :pages (active-idx db) :nodes]
+                     (fn [ns] (filterv #(not (contains? sel (g/nid-of %))) ns)))
+          (assoc :selection #{}))
+      db)))
+
+;; ── step: 全 action の pure 適用 ─────────────────────────────────────────────
+
+(defn step
+  "editor db に action(data vector)を純適用する。host(ratom swap! / re-frame
+  event handler)がこれを呼ぶ — doc の変換は kami.mangaka.genko の関数(SSoT)。"
+  [db [op & args :as action]]
+  (case op
+    :set-tool         (assoc db :tool (first args))
+    :select           (assoc db :selection (set (first args)))
+    :select-node      (assoc db :selection #{(first args)} :tool "select")
+    :set-fuki-type    (assoc db :fuki-type (first args))
+    :set-fuki-tail    (assoc db :fuki-tail (first args))
+    :set-tone-pattern (assoc db :tone-pattern (first args))
+    :add-node         (add-nodes* db [(first args)])
+    :add-nodes        (add-nodes* db (first args))
+    :apply-preset     (add-nodes* db (mapv #(g/panel-node (g/gen-nid) %)
+                                           (g/panel-preset-rects (first args) g/youshi-inner-bounds)))
+    :toggle-vis       (-> (push-undo db)
+                          (update-in [:doc :pages (active-idx db) :nodes] g/toggle-node-visible (first args)))
+    :reorder          (let [[from to position] args]
+                        (-> (push-undo db)
+                            (update-in [:doc :pages (active-idx db) :nodes] g/reorder-nodes from to position)))
+    :undo             (ed/undo db snap ed/restore)
+    :redo             (ed/redo db snap ed/restore)
+    :delete-selected  (delete-selected db)
+    :place-text       (let [[[x y] text] args]
+                        (if (seq text)
+                          (add-nodes* db [(g/text-node (g/gen-nid) {:x x :y y :text text})])
+                          db))
+    :pointer-down     (pointer-down db (first args))
+    :pointer-move     (pointer-move db (first args))
+    :pointer-up       (pointer-up db)
+    :wheel-zoom       (wheel-zoom db (first args))
+    :reset-viewport   (assoc db :viewport gr/default-viewport)
+    :set-doc          (assoc db :doc (first args) :selection #{} :draft nil
+                             :undo-stack [] :redo-stack [])
+    (do (js/console.warn "genko-ui/step: unknown action" (pr-str action)) db)))
+
+(def ^:private doc-ops
+  #{:add-node :add-nodes :apply-preset :toggle-vis :reorder
+    :undo :redo :delete-selected :place-text :pointer-up :set-doc})
+
+(defn doc-action?
+  "doc を変えうる(=永続化が必要な)action か。host の autosave スケジュール判定用。"
+  [[op]]
+  (contains? doc-ops op))
+
+;; ── keyboard ─────────────────────────────────────────────────────────────────
+
+(defn- editable-target?
+  "入力中の element へのキーを editor ショートカットに吸わせない guard。"
+  [e]
+  (let [t (.-target e)
+        tag (some-> t .-tagName)]
+    (or (contains? #{"INPUT" "TEXTAREA" "SELECT"} tag)
+        (some-> t .-isContentEditable))))
+
+(defn keydown-action
+  "keydown event → action vector(または nil)。マッチしたら preventDefault 済み。
+  Cmd/Ctrl+Z = undo, Shift+Cmd/Ctrl+Z / Cmd/Ctrl+Y = redo, Delete/Backspace =
+  delete-selected。input/textarea 等へのタイプは無視。"
+  [e]
+  (when-not (editable-target? e)
+    (if (or (.-ctrlKey e) (.-metaKey e))
+      (case (.-key e)
+        "z" (do (.preventDefault e) (if (.-shiftKey e) [:redo] [:undo]))
+        "y" (do (.preventDefault e) [:redo])
+        nil)
+      (case (.-key e)
+        ("Delete" "Backspace") (do (.preventDefault e) [:delete-selected])
+        nil))))
+
+;; ── JSON export / import ─────────────────────────────────────────────────────
+
+(defn- iso-name [] (str "genko-" (.replace (.toISOString (js/Date.)) #"[:.]" "-") ".json"))
+
+(defn export-json!
+  "doc を JSON ファイルとしてダウンロードさせる。"
+  [doc]
+  (let [blob (js/Blob. #js [(g/write-doc doc)] #js {:type "application/json"})
+        url (js/URL.createObjectURL blob)
+        a (js/document.createElement "a")]
+    (set! (.-href a) url) (set! (.-download a) (iso-name)) (.click a) (js/URL.revokeObjectURL url)))
+
+(defn import-json!
+  "file picker で JSON doc を選ばせ、読めたら [:set-doc doc] を発行する。"
+  [dispatch!]
+  (let [inp (js/document.createElement "input")]
+    (set! (.-type inp) "file") (set! (.-accept inp) ".json")
+    (set! (.-onchange inp)
+          (fn [e] (let [f (aget (.. e -target -files) 0) rd (js/FileReader.)]
+                    (set! (.-onload rd) (fn [_] (when-let [d (g/read-doc (.-result rd))]
+                                                  (dispatch! [:set-doc d]))))
+                    (.readAsText rd f))))
+    (.click inp)))
+
+;; ── WebGL2 2D renderer (draws the genko-render draw-list) ────────────────────
+
+(def ^:private vs-src
+  "#version 300 es\nin vec2 pos;\nvoid main(){gl_Position=vec4(pos,0.0,1.0);}")
+(def ^:private fs-src
+  "#version 300 es\nprecision mediump float;\nuniform vec4 col;\nout vec4 o;\nvoid main(){o=col;}")
+
+(defn- compile-shader [gl type src]
+  (let [s (.createShader gl type)]
+    (.shaderSource gl s src) (.compileShader gl s)
+    (when-not (.getShaderParameter gl s (.-COMPILE_STATUS gl))
+      (js/console.error "shader:" (.getShaderInfoLog gl s)))
+    s))
+
+(defn init-gl!
+  "canvas に WebGL2 context + line/fill 用の単色 shader program を用意する。
+  → {:gl :prog :buf :coll} (render! に渡す)。"
+  [canvas]
+  (let [gl (or (.getContext canvas "webgl2") (throw (js/Error. "no webgl2")))
+        prog (.createProgram gl)]
+    (.attachShader gl prog (compile-shader gl (.-VERTEX_SHADER gl) vs-src))
+    (.attachShader gl prog (compile-shader gl (.-FRAGMENT_SHADER gl) fs-src))
+    (.linkProgram gl prog) (.useProgram gl prog)
+    (let [buf (.createBuffer gl)
+          posl (.getAttribLocation gl prog "pos")
+          coll (.getUniformLocation gl prog "col")]
+      (.bindBuffer gl (.-ARRAY_BUFFER gl) buf)
+      (.enableVertexAttribArray gl posl)
+      (.vertexAttribPointer gl posl 2 (.-FLOAT gl) false 0 0)
+      {:gl gl :prog prog :buf buf :coll coll})))
+
+(defn- world->clip [W H vp [wx wy]]
+  (let [[sx sy] (gr/world->screen vp [wx wy])]
+    [(- (* (/ sx W) 2.0) 1.0) (- 1.0 (* (/ sy H) 2.0))]))
+
+(defn- ellipse-pts [{:keys [x1 y1 x2 y2]}]
+  (let [cx (/ (+ x1 x2) 2.0) cy (/ (+ y1 y2) 2.0)
+        rx (/ (js/Math.abs (- x2 x1)) 2.0) ry (/ (js/Math.abs (- y2 y1)) 2.0)]
+    (for [i (range 48)] (let [a (* 2 js/Math.PI (/ i 48))]
+                          [(+ cx (* rx (js/Math.cos a))) (+ cy (* ry (js/Math.sin a)))]))))
+
+(defn- op->pts [{:keys [op x1 y1 x2 y2 points] :as o}]
+  (case op
+    :rect [[x1 y1] [x2 y1] [x2 y2] [x1 y2]]
+    :poly points
+    :ellipse (ellipse-pts o)
+    []))
+
+(defn- gl-mode
+  "draw op の :mode → GL 描画プリミティブ(:strip/:fan=塗り, :loop/:line=線; 既定 :line)。"
+  [gl mode]
+  (case mode
+    :strip (.-TRIANGLE_STRIP gl)
+    :fan   (.-TRIANGLE_FAN gl)
+    :loop  (.-LINE_LOOP gl)
+    (.-LINE_STRIP gl)))
+
+(defn- draw-op! [gl coll W H vp {:keys [color mode] :as o}]
+  (let [pts (op->pts o)]
+    (when (seq pts)
+      (let [flat (clj->js (mapcat #(world->clip W H vp %) pts))
+            arr (js/Float32Array. flat)]
+        (.bufferData gl (.-ARRAY_BUFFER gl) arr (.-DYNAMIC_DRAW gl))
+        (apply js-invoke gl "uniform4f" coll color)
+        (.drawArrays gl (gl-mode gl mode) 0 (count pts))))))
+
+(defn- draft-mode [{:keys [op _kind]}]
+  (cond (= op :rect) :loop
+        (= op :ellipse) :loop
+        (= _kind "stroke") :line
+        :else :line))
+
+(defn render!
+  "editor db を WebGL2 canvas に描画する(用紙ガイド + node draw-list + draft)。"
+  [{:keys [gl coll]} db]
+  (when (and gl db)
+    (let [cv (.-canvas gl) W (.-width cv) H (.-height cv)
+          vp (:viewport db)
+          youshi (get-in db [:doc :pages (active-idx db) :youshi])
+          draws (into (gr/youshi-draws youshi) (gr/draw-list (active-nodes db) (:selection db)))
+          draft (:draft db)]
+      (.viewport gl 0 0 W H) ; GL viewport(描画先ピクセル範囲) — 編集用 pan/zoom の vp とは別物
+      (.clearColor gl 0.94 0.918 0.84 1.0) ; cream
+      (.clear gl (.-COLOR_BUFFER_BIT gl))
+      (doseq [o draws] (draw-op! gl coll W H vp o))
+      (when draft (draw-op! gl coll W H vp (assoc draft :mode (draft-mode draft)))))))
+
+;; ── pointer input → adapter actions ──────────────────────────────────────────
+;; canvas は attribute 解像度(1000x720 = world->screen が仮定する座標系)を CSS で
+;; 伸縮表示する。offsetX/offsetY は CSS px なので、attribute/CSS 比でスケールしないと
+;; buffer 解像度 ≠ 表示サイズの窓幅で pan/zoom・描画位置がずれる。
+
+(defn- event-screen-xy [e]
+  (let [cv (.-currentTarget e) rect (.getBoundingClientRect cv)]
+    [(* (.-offsetX e) (/ (.-width cv) (.-width rect)))
+     (* (.-offsetY e) (/ (.-height cv) (.-height rect)))]))
+
+;; pentab 筆圧: PointerEvent.pressure(pen=0..1 実測値、mouse/未対応touchは 0 か 0.5 固定)。
+;; 0 は「圧力センサ無し」を意味するため 0.6 にフォールバックし、潰れたストロークを防ぐ。
+(defn- evt-pressure [e]
+  (let [p (.-pressure e)] (if (pos? p) p 0.6)))
+
+(defn attach-canvas!
+  "既存の <canvas> element に genko editor を接続する: WebGL2 init + pointer/
+  wheel listeners(adapter へ action 発行)+ db* 変化で再描画する reaction。
+  → detach fn(listeners 除去 + reaction dispose)。
+
+  スタンドアロン genko.html の静的 <canvas id=gl> と、reagent の `canvas`
+  component の両方がこれを使う(imperative API が単一の正)。"
+  [canvas {:keys [db* dispatch! prompt-fn]}]
+  (let [glm (init-gl! canvas)
+        prompt (or prompt-fn (fn [label default] (js/window.prompt label default)))
+        on-down (fn [e]
+                  (let [db @db*]
+                    (when db
+                      (if (= "text" (:tool db))
+                        (let [[sx sy] (event-screen-xy e)
+                              [x y] (gr/screen->world (:viewport db) [sx sy])]
+                          (when-let [t (prompt "テキスト:" "セリフ")]
+                            (when (seq t) (dispatch! [:place-text [x y] t]))))
+                        (dispatch! [:pointer-down {:screen (event-screen-xy e)
+                                                   :pressure (evt-pressure e)}])))))
+        on-move (fn [e]
+                  (when-let [db @db*]
+                    (when (or (:pan-from db) (:draft db))
+                      (dispatch! [:pointer-move {:screen (event-screen-xy e)
+                                                 :pressure (evt-pressure e)}]))))
+        on-up (fn [_] (when @db* (dispatch! [:pointer-up])))
+        on-wheel (fn [e]
+                   (.preventDefault e)
+                   (when @db*
+                     (dispatch! [:wheel-zoom {:screen (event-screen-xy e)
+                                              :delta-y (.-deltaY e)}])))
+        rx (ratom/run! (render! glm @db*))]
+    (.addEventListener canvas "pointerdown" on-down)
+    (.addEventListener canvas "pointermove" on-move)
+    (js/window.addEventListener "pointerup" on-up)
+    (.addEventListener canvas "wheel" on-wheel #js {:passive false})
+    (fn detach! []
+      (ratom/dispose! rx)
+      (.removeEventListener canvas "pointerdown" on-down)
+      (.removeEventListener canvas "pointermove" on-move)
+      (js/window.removeEventListener "pointerup" on-up)
+      (.removeEventListener canvas "wheel" on-wheel))))
+
+;; ── reagent components ───────────────────────────────────────────────────────
+
+(def tool-names ["select" "draw" "panel" "fukidashi" "tone" "text"])
+
+(defn toolbar
+  "editor toolbar。opts: {:title str-or-nil} — :sync ボタン(☁)は adapter の
+  :sync が在るときだけ出る(status は db の :kotoba-status)。"
+  [{:keys [db* dispatch! sync]} & [{:keys [title]}]]
+  (let [db @db*]
+    (when db
+      [:div {:style {:display "flex" :gap "6px" :padding "6px" :align-items "center"
+                     :background "#111" :color "#fff" :font "13px sans-serif"
+                     :flex-wrap "wrap"}}
+       (when title [:b title])
+       (for [t tool-names]
+         ^{:key t}
+         [:button {:on-click #(dispatch! [:set-tool t])
+                   :style {:padding "4px 8px" :border-radius "6px" :cursor "pointer"
+                           :background (if (= t (:tool db)) "#e06090" "#333") :color "#fff" :border "none"}}
+          t])
+       [:select {:value "" :title "コマ割りプリセット"
+                 :on-change (fn [e]
+                              (let [v (.. e -target -value)]
+                                (when (seq v) (dispatch! [:apply-preset v]))
+                                (set! (.. e -target -value) "")))
+                 :style {:padding "4px" :border-radius "6px"}}
+        [:option {:value ""} "コマ割り…"]
+        (for [k ["1" "2h" "2v" "3h" "2x2"]]
+          ^{:key k} [:option {:value k} k])]
+       (when (= "fukidashi" (:tool db))
+         [:select {:key "fuki-type" :value (:fuki-type db) :title "吹き出し種別"
+                   :on-change #(dispatch! [:set-fuki-type (.. % -target -value)])
+                   :style {:padding "4px" :border-radius "6px"}}
+          (for [ft (sort g/fukidashi-types)] ^{:key ft} [:option {:value ft} ft])])
+       (when (= "fukidashi" (:tool db))
+         [:select {:key "fuki-tail" :value (:fuki-tail db) :title "しっぽの向き"
+                   :on-change #(dispatch! [:set-fuki-tail (.. % -target -value)])
+                   :style {:padding "4px" :border-radius "6px"}}
+          (for [ft (sort g/fukidashi-tails)] ^{:key ft} [:option {:value ft} ft])])
+       (when (= "tone" (:tool db))
+         [:select {:key "tone-pattern" :value (:tone-pattern db) :title "トーンパターン"
+                   :on-change #(dispatch! [:set-tone-pattern (.. % -target -value)])
+                   :style {:padding "4px" :border-radius "6px"}}
+          (for [tp (sort g/tone-patterns)] ^{:key tp} [:option {:value tp} tp])])
+       [:span {:style {:flex "1"}}]
+       [:button {:on-click #(export-json! (:doc @db*)) :style {:padding "4px 8px"}} "⇩ export"]
+       [:button {:on-click #(import-json! dispatch!) :style {:padding "4px 8px"}} "⇧ import"]
+       (when sync
+         [:<>
+          [:button {:on-click (:save! sync) :title (:title sync)
+                    :style {:padding "4px 8px"}} "☁ save"]
+          [:button {:on-click (:load! sync) :title (:title sync)
+                    :style {:padding "4px 8px"}} "☁ load"]
+          (when-let [st (:kotoba-status db)]
+            [:span {:style {:opacity 0.8 :color (if (vector? st) "#e06060" "#8fdc8f")}}
+             (case st :saving "…" :saved "☁✓" :loading "…" :loaded "☁✓"
+                   (str "☁✗ " (second st)))])])
+       [:button {:on-click #(dispatch! [:undo]) :disabled (not (ed/can-undo? db))
+                 :style {:padding "4px 8px"}} "↶ undo"]
+       [:button {:on-click #(dispatch! [:redo]) :disabled (not (ed/can-redo? db))
+                 :style {:padding "4px 8px"}} "↷ redo"]
+       [:button {:on-click #(dispatch! [:reset-viewport])
+                 :title "空白ドラッグ=pan、ホイール=zoom"
+                 :style {:padding "4px 8px"}} "⌂ view"]
+       [:span {:style {:margin-left "8px" :opacity 0.7}}
+        (str (count (active-nodes db)) " nodes · " (.toFixed (* 100 (:zoom (:viewport db))) 0) "%")]])))
+
+(defn- drop-position
+  "drop 先 row の中心より上なら before、下なら after(HTML5 DnD dragover 座標)。"
+  [e]
+  (let [rect (.getBoundingClientRect (.-currentTarget e))
+        mid (/ (+ (.-top rect) (.-bottom rect)) 2)]
+    (if (< (.-clientY e) mid) "before" "after")))
+
+(defn tree
+  "node tree(drag 並べ替え・可視トグル・click 選択)。"
+  [{:keys [db* dispatch!]}]
+  (let [db @db*]
+    (when db
+      (let [rows (g/all-nodes (active-nodes db))]
+        [:div {:style {:width "200px" :padding "6px" :font "12px sans-serif" :overflow "auto"
+                       :border-right "1px solid #ccc" :background "#faf7f0"}}
+         [:div {:style {:font-weight "bold" :margin-bottom "4px"}} "Nodes"]
+         (for [row rows]
+           ^{:key (:nid row)}
+           [:div {:draggable true
+                  :on-drag-start (fn [e] (.setData (.-dataTransfer e) "text/plain" (:nid row)))
+                  :on-drag-over (fn [e] (.preventDefault e))
+                  :on-drop (fn [e]
+                             (.preventDefault e)
+                             (let [from (.getData (.-dataTransfer e) "text/plain")]
+                               (when (and (seq from) (not= from (:nid row)))
+                                 (dispatch! [:reorder from (:nid row) (drop-position e)]))))
+                  :on-click #(dispatch! [:select-node (:nid row)])
+                  :style {:padding "2px 4px" :cursor "grab" :border-radius "4px"
+                          :display "flex" :align-items "center" :gap "4px"
+                          :opacity (if (:vis row) 1 0.4)
+                          :background (if (contains? (:selection db) (:nid row)) "#cfe3ff" "transparent")}}
+            [:span {:on-click (fn [e] (.stopPropagation e) (dispatch! [:toggle-vis (:nid row)]))
+                    :title "表示/非表示"} (if (:vis row) "👁" "🚫")]
+            [:span (:nm row)]])]))))
+
+(defn canvas
+  "WebGL2 canvas component(attach-canvas! を did-mount で接続、unmount で detach)。
+  attribute 解像度は 1000x720 固定(world 座標系の前提)、表示サイズは :style で。"
+  [adapter & [_opts]]
+  (let [el (atom nil) detach (atom nil)]
+    (r/create-class
+     {:display-name "genko-canvas"
+      :component-did-mount
+      (fn [_] (when-let [cv @el] (reset! detach (attach-canvas! cv adapter))))
+      :component-will-unmount
+      (fn [_] (when-let [d @detach] (d) (reset! detach nil)))
+      :reagent-render
+      (fn [_adapter & [{:keys [width height style class]}]]
+        [:canvas {:ref #(reset! el %)
+                  :width (or width 1000) :height (or height 720)
+                  :class class
+                  :style (merge {:touch-action "none" :cursor "crosshair"
+                                 :background "#f0ead6" :display "block"}
+                                style)}])})))
+
+(defn editor
+  "toolbar + node tree + canvas を組んだ埋め込み用レイアウト(ページ内 mount 向け。
+  スタンドアロン genko.html は fixed レイアウトなので個別 component を使う)。
+  opts: {:title :height :style :canvas-style}"
+  [adapter & [{:keys [title height style canvas-style]}]]
+  [:div {:style (merge {:display "flex" :flex-direction "column"
+                        :height (or height "70vh") :min-height "480px"
+                        :background "#f0ead6"}
+                       style)}
+   [toolbar adapter {:title title}]
+   [:div {:style {:display "flex" :flex "1" :min-height "0"}}
+    [tree adapter]
+    [:div {:style {:flex "1" :min-width "0" :overflow "hidden"}}
+     [canvas adapter {:style (merge {:width "100%" :height "100%"} canvas-style)}]]]])
