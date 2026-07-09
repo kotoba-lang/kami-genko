@@ -269,6 +269,16 @@
 (def ^:private fs-src
   "#version 300 es\nprecision mediump float;\nuniform vec4 col;\nout vec4 o;\nvoid main(){o=col;}")
 
+;; textured-quad program (ai-image node draw-op :image) — 2枚目の shader program。
+;; 単色 program(vs-src/fs-src)とは別 program/別 buffer で共存させる(既存の描画は
+;; 一切触らない)。頂点は [x y u v] interleave の per-draw dynamic buffer(単色 program の
+;; :rect/:poly と同様、node 数だけ毎フレーム bufferData する — 原稿用紙+node 数程度の
+;; op 数なら十分軽い。instancing 等は現状の規模ではオーバーエンジニアリング)。
+(def ^:private vs-tex-src
+  "#version 300 es\nin vec2 pos;\nin vec2 uv;\nout vec2 vUv;\nvoid main(){vUv=uv;gl_Position=vec4(pos,0.0,1.0);}")
+(def ^:private fs-tex-src
+  "#version 300 es\nprecision mediump float;\nin vec2 vUv;\nuniform sampler2D tex;\nout vec4 o;\nvoid main(){o=texture(tex,vUv);}")
+
 (defn- compile-shader [gl type src]
   (let [s (.createShader gl type)]
     (.shaderSource gl s src) (.compileShader gl s)
@@ -276,22 +286,41 @@
       (js/console.error "shader:" (.getShaderInfoLog gl s)))
     s))
 
+(defn- link-program! [gl vs fs]
+  (let [prog (.createProgram gl)]
+    (.attachShader gl prog (compile-shader gl (.-VERTEX_SHADER gl) vs))
+    (.attachShader gl prog (compile-shader gl (.-FRAGMENT_SHADER gl) fs))
+    (.linkProgram gl prog)
+    (when-not (.getProgramParameter gl prog (.-LINK_STATUS gl))
+      (js/console.error "program link:" (.getProgramInfoLog gl prog)))
+    prog))
+
 (defn init-gl!
-  "canvas に WebGL2 context + line/fill 用の単色 shader program を用意する。
-  → {:gl :prog :buf :coll} (render! に渡す)。"
+  "canvas に WebGL2 context + 2つの shader program を用意する: 1) line/fill 用の
+  単色 program(既存、panel/stroke/fukidashi/tone/text/prompt/youshi 用)、
+  2) ai-image node 用の textured-quad program(:tex-prog 以下)。texture cache
+  (js/Map、:image-key → WebGLTexture|:pending)も host state としてここに積む
+  (アプリ db ではなくホスト側の描画キャッシュ — db* には一切触れない)。
+  → {:gl :prog :buf :coll :tex-prog :tex-buf :tex-posl :tex-uvl :tex-samplerl
+     :tex-cache} (render! に渡す)。"
   [canvas]
   (let [gl (or (.getContext canvas "webgl2") (throw (js/Error. "no webgl2")))
-        prog (.createProgram gl)]
-    (.attachShader gl prog (compile-shader gl (.-VERTEX_SHADER gl) vs-src))
-    (.attachShader gl prog (compile-shader gl (.-FRAGMENT_SHADER gl) fs-src))
-    (.linkProgram gl prog) (.useProgram gl prog)
+        prog (link-program! gl vs-src fs-src)
+        tex-prog (link-program! gl vs-tex-src fs-tex-src)]
+    (.useProgram gl prog)
     (let [buf (.createBuffer gl)
           posl (.getAttribLocation gl prog "pos")
-          coll (.getUniformLocation gl prog "col")]
+          coll (.getUniformLocation gl prog "col")
+          tex-buf (.createBuffer gl)
+          tex-posl (.getAttribLocation gl tex-prog "pos")
+          tex-uvl (.getAttribLocation gl tex-prog "uv")
+          tex-samplerl (.getUniformLocation gl tex-prog "tex")]
       (.bindBuffer gl (.-ARRAY_BUFFER gl) buf)
       (.enableVertexAttribArray gl posl)
       (.vertexAttribPointer gl posl 2 (.-FLOAT gl) false 0 0)
-      {:gl gl :prog prog :buf buf :coll coll})))
+      {:gl gl :prog prog :buf buf :posl posl :coll coll
+       :tex-prog tex-prog :tex-buf tex-buf :tex-posl tex-posl :tex-uvl tex-uvl
+       :tex-samplerl tex-samplerl :tex-cache (js/Map.)})))
 
 (defn- world->clip [W H vp [wx wy]]
   (let [[sx sy] (gr/world->screen vp [wx wy])]
@@ -321,9 +350,17 @@
     :segments (.-LINES gl)
     (.-LINE_STRIP gl)))
 
-(defn- draw-op! [gl coll W H vp {:keys [color mode] :as o}]
+(defn- draw-op! [gl prog buf posl coll W H vp {:keys [color mode] :as o}]
   (let [pts (op->pts o)]
     (when (seq pts)
+      ;; render! は同一フレーム内で単色 op と textured-quad op(:image、別 program/
+      ;; 別 buffer)を交互に処理しうるので、program/buffer/attrib state は毎回
+      ;; 明示的に(再)バインドする(init-gl! で一度だけ設定 → 以後暗黙に持続、という
+      ;; 前提を捨てて自己完結にする。既存の見た目・挙動は不変)。
+      (.useProgram gl prog)
+      (.bindBuffer gl (.-ARRAY_BUFFER gl) buf)
+      (.enableVertexAttribArray gl posl)
+      (.vertexAttribPointer gl posl 2 (.-FLOAT gl) false 0 0)
       (let [flat (clj->js (mapcat #(world->clip W H vp %) pts))
             arr (js/Float32Array. flat)]
         (.bufferData gl (.-ARRAY_BUFFER gl) arr (.-DYNAMIC_DRAW gl))
@@ -336,20 +373,104 @@
         (= _kind "stroke") :line
         :else :line))
 
+;; ── ai-image texture cache / async decode-and-upload ─────────────────────────
+;; base64(node の :_genImage)は node ごとに一度きり生成され、以後 mutate されない
+;; (app-aozora yoro-ui.state.manga-chat の ai-image-node は :manga-chat/image-success
+;; で1回作られるだけ)ので、draw-list 側の `:image-key` = node id をそのまま cache key
+;; に使える(genko-render.cljc 参照)。decode は createImageBitmap(非同期)— 完了まで
+;; 同じ key の再デコードを起こさないよう cache に :pending を先置きし、完了後は
+;; `redraw!`(db を経由しない直接 render! 呼び出し — ホスト側の描画キャッシュが
+;; 変わっただけで application state は変わっていないため、app の dispatch/db
+;; サイクルを回す必要が無い/回すべきでもない)で1回だけ再描画をトリガする。
+
+(defn- b64->bytes [b64]
+  (let [bin (js/atob b64) len (.-length bin) bytes (js/Uint8Array. len)]
+    (dotimes [i len] (aset bytes i (.charCodeAt bin i)))
+    bytes))
+
+(defn- upload-texture! [gl bitmap]
+  (let [tex (.createTexture gl)]
+    (.bindTexture gl (.-TEXTURE_2D gl) tex)
+    (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_MIN_FILTER gl) (.-LINEAR gl))
+    (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_MAG_FILTER gl) (.-LINEAR gl))
+    (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_WRAP_S gl) (.-CLAMP_TO_EDGE gl))
+    (.texParameteri gl (.-TEXTURE_2D gl) (.-TEXTURE_WRAP_T gl) (.-CLAMP_TO_EDGE gl))
+    (.texImage2D gl (.-TEXTURE_2D gl) 0 (.-RGBA gl) (.-RGBA gl) (.-UNSIGNED_BYTE gl) bitmap)
+    (.bindTexture gl (.-TEXTURE_2D gl) nil)
+    tex))
+
+(defn- ensure-texture!
+  "cache(js/Map)に `key` の texture が無ければ、`b64` を非同期 decode→upload して
+  cache に積み、完了後 `redraw!` を呼ぶ。既に :pending(decode 中)/texture 済みなら
+  何もしない — 同じ node を毎フレーム見ても decode は生涯 1 回だけ。"
+  [gl cache key b64 redraw!]
+  (when (and (seq b64) (not (.has cache key)))
+    (.set cache key :pending)
+    (-> (js/Promise.resolve (js/Blob. #js [(b64->bytes b64)] #js {:type "image/png"}))
+        (.then (fn [blob] (js/createImageBitmap blob)))
+        (.then (fn [bitmap]
+                 (.set cache key (upload-texture! gl bitmap))
+                 (redraw!)))
+        (.catch (fn [err]
+                  (js/console.error "kami.mangaka.genko-ui: ai-image texture decode failed"
+                                     (pr-str key) err)
+                  (.delete cache key))))))
+
+(defn- draw-image-op!
+  "`:op :image` draw op → textured quad(TRIANGLE_FAN、既存 :fan 語彙の流用で新規
+  primitive 無し)。texture が未だキャッシュに無い/decode 中(:pending)の1フレーム目は
+  何も描かない(=空白のまま)のではなく、既存の単色パイプラインで dashed 相当の
+  placeholder 枠(prompt node と同じ見た目)を代わりに描く — 位置がすぐ判る方が
+  『画像生成中、まだ来てない』を『バグって消えた』と誤読されにくいため。"
+  [{:keys [gl tex-prog tex-buf tex-posl tex-uvl tex-samplerl tex-cache prog buf posl coll]}
+   W H vp {:keys [x1 y1 x2 y2 image-key image-b64] :as o} redraw!]
+  (ensure-texture! gl tex-cache image-key image-b64 redraw!)
+  (let [cached (.get tex-cache image-key)]
+    (if (and cached (not= :pending cached))
+      (let [corners [[x1 y1] [x2 y1] [x2 y2] [x1 y2]]
+            uvs [[0 0] [1 0] [1 1] [0 1]]
+            flat (clj->js (mapcat (fn [pt [u v]]
+                                     (let [[cx cy] (world->clip W H vp pt)]
+                                       [cx cy u v]))
+                                   corners uvs))
+            arr (js/Float32Array. flat)]
+        (.useProgram gl tex-prog)
+        (.bindBuffer gl (.-ARRAY_BUFFER gl) tex-buf)
+        (.bufferData gl (.-ARRAY_BUFFER gl) arr (.-DYNAMIC_DRAW gl))
+        (.enableVertexAttribArray gl tex-posl)
+        (.vertexAttribPointer gl tex-posl 2 (.-FLOAT gl) false 16 0)
+        (.enableVertexAttribArray gl tex-uvl)
+        (.vertexAttribPointer gl tex-uvl 2 (.-FLOAT gl) false 16 8)
+        (.activeTexture gl (.-TEXTURE0 gl))
+        (.bindTexture gl (.-TEXTURE_2D gl) cached)
+        (.uniform1i gl tex-samplerl 0)
+        (.drawArrays gl (.-TRIANGLE_FAN gl) 0 4))
+      (draw-op! gl prog buf posl coll W H vp
+                {:op :rect :mode :loop :x1 x1 :y1 y1 :x2 x2 :y2 y2
+                 :color [0.5 0.5 0.5 0.9] :width 2}))))
+
 (defn render!
-  "editor db を WebGL2 canvas に描画する(用紙ガイド + node draw-list + draft)。"
-  [{:keys [gl coll]} db]
-  (when (and gl db)
-    (let [cv (.-canvas gl) W (.-width cv) H (.-height cv)
-          vp (:viewport db)
-          youshi (get-in db [:doc :pages (active-idx db) :youshi])
-          draws (into (gr/youshi-draws youshi) (gr/draw-list (active-nodes db) (:selection db)))
-          draft (:draft db)]
-      (.viewport gl 0 0 W H) ; GL viewport(描画先ピクセル範囲) — 編集用 pan/zoom の vp とは別物
-      (let [[dr dg dbv da] gr/desk-color] (.clearColor gl dr dg dbv da)) ; 机 = クリーム(紙面とは別色)
-      (.clear gl (.-COLOR_BUFFER_BIT gl))
-      (doseq [o draws] (draw-op! gl coll W H vp o))
-      (when draft (draw-op! gl coll W H vp (assoc draft :mode (draft-mode draft)))))))
+  "editor db を WebGL2 canvas に描画する(用紙ガイド + node draw-list + draft)。
+  `redraw!`(省略時 = 同じ db でこの render! を再実行する thunk)は ai-image node の
+  texture が非同期 decode 完了した瞬間にもう1回描画するための直接呼び出し —
+  attach-canvas! は db* を再 deref する版を渡す(呼び出し時点の最新 db で再描画する
+  ため。省略時のデフォルトはこの db スナップショットで代用するだけの fallback)。"
+  ([glm db] (render! glm db (fn [] (render! glm db))))
+  ([{:keys [gl prog buf posl coll] :as glm} db redraw!]
+   (when (and gl db)
+     (let [cv (.-canvas gl) W (.-width cv) H (.-height cv)
+           vp (:viewport db)
+           youshi (get-in db [:doc :pages (active-idx db) :youshi])
+           draws (into (gr/youshi-draws youshi) (gr/draw-list (active-nodes db) (:selection db)))
+           draft (:draft db)]
+       (.viewport gl 0 0 W H) ; GL viewport(描画先ピクセル範囲) — 編集用 pan/zoom の vp とは別物
+       (let [[dr dg dbv da] gr/desk-color] (.clearColor gl dr dg dbv da)) ; 机 = クリーム(紙面とは別色)
+       (.clear gl (.-COLOR_BUFFER_BIT gl))
+       (doseq [o draws]
+         (if (= :image (:op o))
+           (draw-image-op! glm W H vp o redraw!)
+           (draw-op! gl prog buf posl coll W H vp o)))
+       (when draft (draw-op! gl prog buf posl coll W H vp (assoc draft :mode (draft-mode draft))))))))
 
 ;; ── pointer input → adapter actions ──────────────────────────────────────────
 ;; canvas は attribute 解像度(1000x720 = world->screen が仮定する座標系)を CSS で
@@ -397,7 +518,11 @@
                    (when @db*
                      (dispatch! [:wheel-zoom {:screen (event-screen-xy e)
                                               :delta-y (.-deltaY e)}])))
-        rx (ratom/run! (render! glm @db*))]
+        ;; ai-image texture の非同期 decode 完了トリガ: db* を経由せず(=dispatch!/app
+        ;; state を一切介さず)、その時点の最新 db で直接もう1回 render! するだけの
+        ;; 純ホスト側の副作用。db* が nil(unmount 後 等)なら何もしない。
+        redraw! (fn redraw! [] (when-let [db @db*] (render! glm db redraw!)))
+        rx (ratom/run! (render! glm @db* redraw!))]
     (.addEventListener canvas "pointerdown" on-down)
     (.addEventListener canvas "pointermove" on-move)
     (js/window.addEventListener "pointerup" on-up)
