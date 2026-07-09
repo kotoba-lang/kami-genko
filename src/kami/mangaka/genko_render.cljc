@@ -127,6 +127,20 @@
 
 (def ^:private tone-fill [0.35 0.35 0.35 0.85])
 
+;; ── color helpers ────────────────────────────────────────────────────────────
+
+#?(:clj (defn- hex-byte [s] (Integer/parseInt s 16))
+   :cljs (defn- hex-byte [s] (js/parseInt s 16)))
+
+(defn hex->rgba
+  "\"#rrggbb\" (g/agent-color の返り値) → [r g b a] 0..1(a=1.0 固定)。"
+  [hex]
+  (let [h (subs hex 1)]
+    [(/ (hex-byte (subs h 0 2)) 255.0)
+     (/ (hex-byte (subs h 2 4)) 255.0)
+     (/ (hex-byte (subs h 4 6)) 255.0)
+     1.0]))
+
 (defn tone-dot-draws
   "tonePattern=\"dot\": グリッド上に並んだ塗り円(網点/ハーフトーン風)。"
   [x1 y1 x2 y2]
@@ -170,9 +184,35 @@
     "grad" (tone-grad-draws x1 y1 x2 y2)
     (tone-dot-draws x1 y1 x2 y2)))
 
+(def ^:private prompt-placeholder-width 2)
+
+(defn prompt-draws
+  "\"prompt\" node → 矩形の placeholder 枠(この panel の予定コンテンツを示すだけ)、
+  persona の agent-color で色分け(g/agent-color と同じ色 SSoT を使い、toolbar/node-tree
+  等の他箇所と一致させる)。既存語彙(:rect :mode :loop, 新規プリミティブ無し)を再利用 —
+  \"dashed\" な見た目(線分の破線 stipple)にするには :mode :segments 等で輪郭を多数の
+  短い線分へ分割する必要があるが、それは新規の tessellation ロジックであり、テキスト
+  node の 8x8 マーカ矩形と同じ fidelity(=グリフ/実コンテンツは描かない placeholder)を
+  保つにはオーバーエンジニアリングなので採らない — agent-color による色分けだけで
+  panel 枠(ink 色/実線)と視覚的に区別できる。"
+  [{:keys [x1 y1 x2 y2 _agent]}]
+  [{:op :rect :mode :loop :x1 x1 :y1 y1 :x2 x2 :y2 y2
+    :color (hex->rgba (g/agent-color _agent)) :width prompt-placeholder-width}])
+
+(defn ai-image-draws
+  "\"ai-image\" node → :op :image 1つ(bounds + 安定 cache key + base64 payload)。
+  key は node id(:_nid) — この node は生成成功時に一度だけ作られ、以後 :_genImage は
+  変更されない(app-aozora の manga_chat.cljc に mutate 箇所なし)ので id 単独で安全な
+  cache key になる。host(WebGL2)は key ごとに一度だけ decode+upload しキャッシュする。
+  :_genImage が空(理論上は起きないが防御的に)は draw op を出さない。"
+  [{:keys [x1 y1 x2 y2 _genImage] :as d} nid]
+  (when (seq _genImage)
+    [{:op :image :x1 x1 :y1 y1 :x2 x2 :y2 y2 :image-key nid :image-b64 _genImage}]))
+
 (defn node->draws
   "1 node → draw ops。panel=矩形枠, stroke=筆圧リボン, fukidashi=種別別輪郭+しっぽ,
-  tone=パターン塗り, text=位置マーカ。"
+  tone=パターン塗り, text=位置マーカ, prompt=agent-color 枠(placeholder),
+  ai-image=テクスチャ画像(:op :image)。"
   [n]
   (let [d (g/node-data n) t (g/type-of n)]
     (case t
@@ -184,6 +224,8 @@
       "tone"      (tone-draws d)
       "text"      [{:op :rect :mode :loop :x1 (:x d) :y1 (:y d) :x2 (+ (:x d) 8) :y2 (+ (:y d) 8)
                     :color [0.7 0.1 0.45 1.0] :width 1}]
+      "prompt"    (when (:x1 d) (prompt-draws d))
+      "ai-image"  (when (:x1 d) (ai-image-draws d (g/nid-of n)))
       nil)))
 
 ;; ── 原稿用紙 (genkouyoushi) templates ───────────────────────────────────────

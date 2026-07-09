@@ -174,3 +174,42 @@
   (testing "stroke は :mode :strip(筆圧リボン)"
     (let [s (g/wrap-node "s1" "stroke" {:points [{:x 0 :y 0 :p 0.5} {:x 10 :y 10 :p 0.9}] :size 3})]
       (is (= [:poly :strip] ((juxt :op :mode) (first (gr/node->draws s))))))))
+
+(deftest hex->rgba-conversion
+  (testing "#rrggbb → [r g b a] 0..1、a=1.0"
+    (is (= [1.0 1.0 1.0 1.0] (gr/hex->rgba "#ffffff")))
+    (is (= [0.0 0.0 0.0 1.0] (gr/hex->rgba "#000000")))
+    (is (= [(/ 224.0 255.0) (/ 96.0 255.0) (/ 96.0 255.0) 1.0] (gr/hex->rgba "#e06060")))))
+
+(deftest prompt-node-draws
+  (testing "prompt → 1 op、:rect :mode :loop(既存語彙の再利用、新規プリミティブ無し)"
+    (let [n (g/wrap-node "p1" "prompt" {:prompt "x" :_agent "shonen" :x1 0 :y1 0 :x2 100 :y2 80})
+          draws (gr/node->draws n)]
+      (is (= 1 (count draws)))
+      (is (= [:rect :loop] ((juxt :op :mode) (first draws))))
+      (is (= {:x1 0 :y1 0 :x2 100 :y2 80} (select-keys (first draws) [:x1 :y1 :x2 :y2])))))
+  (testing "色は g/agent-color と同じ SSoT(persona ごとに違う色、他の場所と一致)"
+    (let [draw-for (fn [agent] (first (gr/node->draws
+                                       (g/wrap-node "p" "prompt" {:prompt "x" :_agent agent
+                                                                  :x1 0 :y1 0 :x2 10 :y2 10}))))]
+      (is (= (gr/hex->rgba (g/agent-color "shonen")) (:color (draw-for "shonen"))))
+      (is (= (gr/hex->rgba (g/agent-color "mecha")) (:color (draw-for "mecha"))))
+      (is (not= (:color (draw-for "shonen")) (:color (draw-for "mecha")))
+          "persona が違えば色も違う")))
+  (testing "bounds(:x1 等)を持たない prompt node(旧 g/prompt-node 由来など)は描かない(nil)"
+    (is (nil? (gr/node->draws (g/prompt-node "p2" {:prompt "no bounds"}))))))
+
+(deftest ai-image-node-draws
+  (testing "ai-image → 1 op、:op :image、bounds + 安定 key(node id)+ base64 を運ぶ"
+    (let [n (g/wrap-node "img1" "ai-image" {:_genImage "ZmFrZQ==" :_genPrompt "a cat" :_agent "shonen"
+                                            :x1 5 :y1 6 :x2 105 :y2 86})
+          draws (gr/node->draws n)]
+      (is (= 1 (count draws)))
+      (is (= :image (:op (first draws))))
+      (is (= {:x1 5 :y1 6 :x2 105 :y2 86} (select-keys (first draws) [:x1 :y1 :x2 :y2])))
+      (is (= "img1" (:image-key (first draws))) "cache key = node id(:_nid)")
+      (is (= "ZmFrZQ==" (:image-b64 (first draws))))))
+  (testing "base64 が空(理論上起きないが防御的)は draw op を出さない"
+    (is (nil? (gr/node->draws (g/wrap-node "img2" "ai-image" {:_genImage "" :x1 0 :y1 0 :x2 10 :y2 10})))))
+  (testing "bounds を持たない ai-image node は描かない(nil)"
+    (is (nil? (gr/node->draws (g/wrap-node "img3" "ai-image" {:_genImage "ZmFrZQ=="}))))))
