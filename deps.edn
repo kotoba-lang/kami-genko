@@ -19,7 +19,17 @@
         ;; canvaskit: viewport 数学の正本 (UIScrollView semantics)。genko-render の
         ;; pan/zoom/world<->screen が委譲する (ADR-2607071130。旧 freeboard 移植コピーを差し戻し)。zero-dep。
         io.github.kotoba-lang/canvaskit {:git/url "https://github.com/kotoba-lang/canvaskit.git"
-                                         :git/sha "2e8ab2a996d5f405a9fd601e42993451c1f34874"}}
+                                         :git/sha "2e8ab2a996d5f405a9fd601e42993451c1f34874"}
+        ;; kotobase.{client,cacao,cid} — canonical kotobase.net datom-plane client
+        ;; (q/datoms/pull/transact + CACAO auth + graph CID), consumed here instead
+        ;; of a vendored copy under src/kotobase/ (that vendored copy predated the
+        ;; 2026-07-09 apex CACAO shape and 401'd against kotobase.net; removed —
+        ;; see kotobase-client README "Why this repo exists"). cljs-only, no JVM
+        ;; deps of its own; npm deps (@noble/curves v1, @noble/hashes, @ipld/dag-cbor)
+        ;; come from this repo's own package.json (already present).
+        io.github.kotoba-lang/kotobase-client
+        {:git/url "https://github.com/kotoba-lang/kotobase-client.git"
+         :git/sha "bbebe33d6888c915b64b32e5fc68720fac3aa97e"}}
 
  :aliases
  {;; Browser bridge: globalThis.KamiGenko を install する単一 JS を出す (reader と同型)。
@@ -28,9 +38,9 @@
                       reagent/reagent           {:mvn/version "1.2.0"}}}
 
   ;; shadow-cljs :kotobase-test(:node-test) の classpath に cljs-test/ を足すだけの
-  ;; alias。cljs 専用構文(cljs.test / npm require)の vendored test を JVM の
-  ;; clojure -M:test(cognitect.test-runner, test/ を scan)から隔離するため
-  ;; test/ とは別ディレクトリに置く。
+  ;; alias。cljs 専用構文(cljs.test / npm require)の kotobase-client(git dep)
+  ;; smoke test を JVM の clojure -M:test(cognitect.test-runner, test/ を scan)
+  ;; から隔離するため test/ とは別ディレクトリに置く。
   :cljs-test {:extra-paths ["cljs-test"]}
 
   :test {:extra-paths ["test"]

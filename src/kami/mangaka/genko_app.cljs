@@ -9,8 +9,10 @@
   は genko-ui の ns docstring 参照(re-frame host = app-aozora も同じ components
   を使う)。
 
-  kotoba-server(kotobase.net)への CACAO 自己発行永続(vendored kotobase.{cid,cacao,
-  client})を任意同期として搭載。既定の自動保存は引き続き localStorage(信頼性優先、
+  kotoba-server(kotobase.net)への CACAO 自己発行永続(kotoba-lang/kotobase-client の
+  kotobase.{cid,cacao,client} — deps.edn の git dep。旧 vendored copy は 2026-07-09、
+  apex CACAO 形式 401 修正を機に削除し正本へ寄せた)を任意同期として搭載。既定の
+  自動保存は引き続き localStorage(信頼性優先、
   ネットワーク往復をキー入力のたびに走らせない)。この kotobase 同期はこの
   standalone wrapper 側の持ち物で、genko-ui には入れない(host 差し込み)。"
   (:require [reagent.dom :as rdom]
@@ -72,13 +74,17 @@
 ;; (このURI自体を解決する汎用 AT Protocol リゾルバは想定しない)。
 (def kotoba-at-uri (str "at://" kotoba-did "/kotoba.genko.doc/" kotoba-db-name))
 
-;; 実測で判明した kotobase.net の datomic 面の制約(ライブ検証、2026-07-02):
+;; 実測で判明した kotobase.net の datomic 面の制約(ライブ検証、2026-07-02;
+;; q/datoms field 差異は 2026-07-09 の kotobase-client 移行に伴う live probe で再確認):
 ;; - :db/id は整数 tempid でなければならない(文字列 tempid は黙って 0 datom で
 ;;   no-op になる) — client_request_test.cljc の `-1` 慣習どおり。
 ;; - entity id は(整数 eid でなく)不透明な CID 文字列 — "最新" は eid 順序でなく
 ;;   自前の :genko/updated-at(ISO8601 文字列, 辞書順=時系列順)で判定する。
 ;; - サーバの EDN reader は文字列値中のエスケープ済みダブルクォート(\")を正しく
 ;;   扱えない(2属性目以降が黙って消える)。JSON を直接埋め込まず base64 で包む。
+;; - `kc/q`(datalog)はこの環境で rows が空/期待 field 不一致になる(ADR-2607091800
+;;   の既知の実測知見。2026-07-09 kotobase-client 移行後の live probe でも再現)。
+;;   読出しは genko_store(app-aozora)と同じく `kc/datoms`(:eavt index scan)を使う。
 (defn kotoba-save!
   "現在の doc を kotobase.net の operator db(kotoba-db-name)へ transact する
   (CACAO は kc/transact が呼ぶたびに自己発行、ttl 300s)。Promise を返す。"
@@ -88,19 +94,32 @@
     (kc/transact kotoba-client kotoba-db-name tx)))
 
 (defn kotoba-load!
-  "kotoba-db-name の :genko/doc-json(base64)+ :genko/updated-at を持つ全行を取得し、
-  updated-at 降順で最初にデコード成功したものを doc として復元する(壊れた/異物の
-  行が新しい timestamp を騙っていても無視して次点にフォールバックする)。1件も
-  無ければ resolve(nil)。"
+  "kotoba-db-name を `:eavt` datoms scan で全走査し、entity(不透明な `:e`)ごとに
+  ログ順 last-wins(cardinality-one スキーマが無いため再 assert は蓄積する — ADR
+  注記参照)で attr map に fold、:genko/doc-json を持つ entity を
+  :genko/updated-at 降順に並べ、最初にデコード成功したものを doc として復元する
+  (壊れた/異物の entity が新しい timestamp を騙っていても無視して次点に
+  フォールバックする)。1件も無ければ resolve(nil)。"
   []
-  (-> (kc/q kotoba-client kotoba-db-name
-           "{:find [?v ?t] :where [[?e :genko/doc-json ?v] [?e :genko/updated-at ?t]]}")
+  (-> (kc/datoms kotoba-client kotoba-db-name ":eavt")
       (.then (fn [^js res]
-               (let [rows (js->clj (.-rows_edn res))
-                     decoded (mapv (fn [[v t]] [(kc/decode-edn-scalar v) (kc/decode-edn-scalar t)]) rows)
-                     newest-first (->> decoded (sort-by second) reverse)]
-                 (some (fn [[v _t]]
-                         (try (g/read-doc (js/atob v)) (catch :default _ nil)))
+               (let [ds (js->clj (.-datoms res) :keywordize-keys true)
+                     entities (->> ds
+                                   (group-by :e)
+                                   vals
+                                   (map (fn [entity-datoms]
+                                          (reduce (fn [m {:keys [a v_edn added]}]
+                                                    (if added
+                                                      (assoc m a (kc/decode-edn-scalar v_edn))
+                                                      (dissoc m a)))
+                                                  {} entity-datoms))))
+                     newest-first (->> entities
+                                       (filter #(get % ":genko/doc-json"))
+                                       (sort-by #(get % ":genko/updated-at"))
+                                       reverse)]
+                 (some (fn [e]
+                         (try (g/read-doc (js/atob (get e ":genko/doc-json")))
+                              (catch :default _ nil)))
                        newest-first))))))
 
 (defn kotoba-sync-save! []
