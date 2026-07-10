@@ -62,10 +62,11 @@
                        {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                        ;; bridge test が page->storyboard → analyzeExpression 連携を確認するため、
                        ;; kami.mangaka.expression を test-only の git dep で取得 (runtime 依存ではない)。
+                       ;; SSoT: kotoba-lang/kami-mangaka-expression (ADR-2607102200 addendum 13;
+                       ;; nested kami-engine/kami-mangaka-expression-clj is a README shim only).
                        io.github.kotoba-lang/kami-mangaka-expression
-                       {:git/url "https://github.com/kotoba-lang/kami-engine.git"
-                        :git/sha "60c9a095c04000b7af4ee2ddc293386739980690"
-                        :deps/root "kami-mangaka-expression-clj"}}
+                       {:git/url "https://github.com/kotoba-lang/kami-mangaka-expression.git"
+                        :sha "1fe312c6cdeb0d6aef3c20403d8748f9d4244795"}}
          :main-opts   ["-m" "cognitect.test-runner"]}
 
   ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
