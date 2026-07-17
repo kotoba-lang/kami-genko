@@ -244,55 +244,19 @@
 ;;       紙面 [0.98 0.98 0.97]、目盛り帯 [0.88 0.94 0.97]、机(desk)= #f0ead6
 ;;   線幅: 0.15..0.7mm(embed は最低 0.5px の半幅で tessellate — fit スケール
 ;;       ≈1.87px/mm では実質 ≈1px。本 renderer は hairline で描く=同等の見た目)。
-;; mm→world px: world 窓 1000×720 に、旧 bare-rect 世代の縦帯 (y 20..700) を保つ
-;; uniform scale youshi-px-per-mm = 680/364 ≈ 1.8681、紙面は x=500 に中央寄せ。
+;; mm→world px の spec/算術の正本は kami.mangaka.genko(doc 層、canvaskit 非依存)
+;; へ移動 — genko-tx 系の消費者が render を require せずに読めるようにするため。
+;; 以下は後方互換 alias(genko-ui / テスト / 既存 host は gr/* 名で参照し続ける)。
 
-(def youshi-templates
-  "原稿用紙 template spec (mm)。key = page の :youshi :type (g/youshi-types)。"
-  {"none"    {:draw false}
-   "b4manga" {:draw true :w-mm 257.0 :h-mm 364.0
-              :trim  {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0}
-              :outer {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0}
-              :inner {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0}
-              :ruler-step 5 :ruler-small 1}
-   "b4koma"  {:draw true :w-mm 257.0 :h-mm 364.0
-              :trim  {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0}
-              :outer {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0}
-              :inner {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0}
-              :ruler-step 5 :ruler-small 1 :koma 4}})
-
-(def youshi-px-per-mm
-  "mm→world px の uniform scale。B4 の紙高 364mm を旧 bare-rect 世代の縦帯
-  y 20..700 (680px) にはめる = 680/364 ≈ 1.8681。"
-  (/ 680.0 364.0))
-
-(def youshi-origin
-  "紙面左上の world 座標 [x y]。x=500 中央寄せ、y=20(旧世代の上端と同じ)。"
-  [(- 500.0 (* 257.0 0.5 youshi-px-per-mm)) 20.0])
-
-(defn mm->world
-  "原稿用紙 mm 座標(紙左上原点)→ world px [x y]。"
-  [mx my]
-  (let [[ox oy] youshi-origin]
-    [(+ ox (* mx youshi-px-per-mm)) (+ oy (* my youshi-px-per-mm))]))
-
-(defn- mm-rect->world [{:keys [x1 y1 x2 y2]}]
-  (let [[wx1 wy1] (mm->world x1 y1) [wx2 wy2] (mm->world x2 y2)]
-    {:x1 wx1 :y1 wy1 :x2 wx2 :y2 wy2}))
-
-(def youshi-paper-bounds
-  "用紙全体 (B4 257×364mm) の world 座標。"
-  (mm-rect->world {:x1 0.0 :y1 0.0 :x2 257.0 :y2 364.0}))
-(def youshi-trim-bounds
-  "裁ち落とし枠 (trim) の world 座標。"
-  (mm-rect->world (:trim (youshi-templates "b4manga"))))
-(def youshi-frame-bounds
-  "基本枠 (印刷領域) の world 座標。"
-  (mm-rect->world (:outer (youshi-templates "b4manga"))))
-(def youshi-safe-bounds
-  "内枠 (150×220mm テキスト安全域) の world 座標。embed の panel preset が分割する
-  領域 (getYoushiInnerRect) と同じ — genko-ui の :apply-preset がこれを渡す。"
-  (mm-rect->world (:inner (youshi-templates "b4manga"))))
+(def youshi-templates g/youshi-templates)
+(def youshi-px-per-mm g/youshi-px-per-mm)
+(def youshi-origin g/youshi-origin)
+(def mm->world g/mm->world)
+(def mm-rect->world g/mm-rect->world)
+(def youshi-paper-bounds g/youshi-paper-bounds)
+(def youshi-trim-bounds g/youshi-trim-bounds)
+(def youshi-frame-bounds g/youshi-frame-bounds)
+(def youshi-safe-bounds g/youshi-safe-bounds)
 
 (def desk-color
   "机(キャンバス背景)。embed のページ背景 #f0ead6 と同じクリーム。"

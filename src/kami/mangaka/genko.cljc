@@ -39,11 +39,67 @@
 (def youshi-types     #{"b4manga" "b4koma" "none"})
 
 ;; youshi(原稿用紙) の旧固定ジオメトリ(world px; bare-rect 世代)。現行の SSoT は
-;; kami.mangaka.genko-render の youshi-templates(genko-embed.ts の mm 実寸スペック)と
-;; そこから導出される youshi-{paper,trim,frame,safe}-bounds — youshi-draws と
-;; genko-ui の :apply-preset はそちらを使う。この2定数は互換のため残置(非推奨)。
+;; 下の youshi-templates(genko-embed.ts の mm 実寸スペック)とそこから導出される
+;; youshi-{paper,trim,frame,safe}-bounds。この2定数は互換のため残置(非推奨)。
 (def youshi-outer-bounds {:x1 250 :y1 20 :x2 750 :y2 700})
 (def youshi-inner-bounds {:x1 285 :y1 70 :x2 715 :y2 650})
+
+;; ── youshi(原稿用紙) 実寸ジオメトリ(SSoT) ──────────────────────────────────
+;; 旧: kami.mangaka.genko-render に居た定義群。render IR(canvaskit 依存)を
+;; 要求しない純データ/算術なので doc 層のここが正本 — genko-render は同名の
+;; 後方互換 alias を維持し、genko-tx 系の消費者(app-aozora の :gh.manga/rect
+;; 投影)は render を require せずにここから読む。
+;; mm→world px: world 窓 1000×720 に、旧 bare-rect 世代の縦帯 (y 20..700) を保つ
+;; uniform scale youshi-px-per-mm = 680/364 ≈ 1.8681、紙面は x=500 に中央寄せ。
+
+(def youshi-templates
+  "原稿用紙 template spec (mm)。key = page の :youshi :type (youshi-types)。"
+  {"none"    {:draw false}
+   "b4manga" {:draw true :w-mm 257.0 :h-mm 364.0
+              :trim  {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0}
+              :outer {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0}
+              :inner {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0}
+              :ruler-step 5 :ruler-small 1}
+   "b4koma"  {:draw true :w-mm 257.0 :h-mm 364.0
+              :trim  {:x1 18.0 :y1 18.0 :x2 239.0 :y2 346.0}
+              :outer {:x1 25.0 :y1 27.0 :x2 232.0 :y2 337.0}
+              :inner {:x1 53.5 :y1 72.0 :x2 203.5 :y2 292.0}
+              :ruler-step 5 :ruler-small 1 :koma 4}})
+
+(def youshi-px-per-mm
+  "mm→world px の uniform scale。B4 の紙高 364mm を旧 bare-rect 世代の縦帯
+  y 20..700 (680px) にはめる = 680/364 ≈ 1.8681。"
+  (/ 680.0 364.0))
+
+(def youshi-origin
+  "紙面左上の world 座標 [x y]。x=500 中央寄せ、y=20(旧世代の上端と同じ)。"
+  [(- 500.0 (* 257.0 0.5 youshi-px-per-mm)) 20.0])
+
+(defn mm->world
+  "原稿用紙 mm 座標(紙左上原点)→ world px [x y]。"
+  [mx my]
+  (let [[ox oy] youshi-origin]
+    [(+ ox (* mx youshi-px-per-mm)) (+ oy (* my youshi-px-per-mm))]))
+
+(defn mm-rect->world
+  "原稿用紙 mm 矩形 {:x1 :y1 :x2 :y2} → world px 矩形。"
+  [{:keys [x1 y1 x2 y2]}]
+  (let [[wx1 wy1] (mm->world x1 y1) [wx2 wy2] (mm->world x2 y2)]
+    {:x1 wx1 :y1 wy1 :x2 wx2 :y2 wy2}))
+
+(def youshi-paper-bounds
+  "用紙全体 (B4 257×364mm) の world 座標。"
+  (mm-rect->world {:x1 0.0 :y1 0.0 :x2 257.0 :y2 364.0}))
+(def youshi-trim-bounds
+  "裁ち落とし枠 (trim) の world 座標。"
+  (mm-rect->world (:trim (youshi-templates "b4manga"))))
+(def youshi-frame-bounds
+  "基本枠 (印刷領域) の world 座標。"
+  (mm-rect->world (:outer (youshi-templates "b4manga"))))
+(def youshi-safe-bounds
+  "内枠 (150×220mm テキスト安全域) の world 座標。embed の panel preset が分割する
+  領域 (getYoushiInnerRect) と同じ — genko-ui の :apply-preset がこれを渡す。"
+  (mm-rect->world (:inner (youshi-templates "b4manga"))))
 
 ;; コマ割りプリセット: 基本枠を 0..1 の正規化 [x1 y1 x2 y2] 矩形の列に分割する語彙。
 ;; cljs に Ratio 型が無いため分数リテラル(1/2 等)は使わず double 演算で表す。
@@ -528,3 +584,47 @@
 (defn doc->storyboards
   "全 page を storyboard に射影 [{:panels …} …]。"
   [doc] (mapv page->storyboard (:pages doc)))
+
+;; ── panel 矩形のページ正規化(:gh.manga/rect / komawari :panel/rect 座標系) ──
+
+(defn- round4 [n] (/ (Math/round (* (double n) 10000.0)) 10000.0))
+
+(defn page-koma-bounds
+  "page の youshi 実寸に基づくコマ割り基準枠 = 内枠 youshi-safe-bounds
+  (embed の panel preset が分割する領域)。youshi を描画しない page
+  (:type \"none\" / youshi 無し)は nil。"
+  [page]
+  (when (:draw (get youshi-templates (get-in page [:youshi :type])))
+    youshi-safe-bounds))
+
+(defn normalize-rect
+  "world px [x1 y1 x2 y2] → 基準枠 frame({:x1 :y1 :x2 :y2})に対する正規化
+  [x y w h](基準枠が 0..1。枠外に描かれた矩形は範囲外の値のまま=裁ち落とし
+  相当)。1e-4 丸め。座標が欠けるか基準枠が退化していれば nil。"
+  [[rx1 ry1 rx2 ry2] frame]
+  (let [{fx1 :x1 fy1 :y1 fx2 :x2 fy2 :y2} frame
+        fw (when (and (number? fx1) (number? fx2)) (- fx2 fx1))
+        fh (when (and (number? fy1) (number? fy2)) (- fy2 fy1))]
+    (when (and (number? rx1) (number? ry1) (number? rx2) (number? ry2)
+               (number? fw) (pos? fw) (number? fh) (pos? fh))
+      [(round4 (/ (- rx1 fx1) fw)) (round4 (/ (- ry1 fy1) fh))
+       (round4 (/ (- rx2 rx1) fw)) (round4 (/ (- ry2 ry1) fh))])))
+
+(defn page-panel-rects-normalized
+  "page → page->storyboard と同順(panel node の :nodes 順)の正規化 [x y w h] 列。
+  基準枠は page-koma-bounds(youshi 内枠)、youshi の無い page は panel 矩形群の
+  外接 bbox(絶対位置は落ちるが相対レイアウトは保存)。正規化できない panel は
+  nil。:gh.manga/rect / kami.mangaka.komawari の :panel/rect と同じページ座標系
+  なので、genko 手描きレイアウトを tx へそのまま持ち出せる。"
+  [page]
+  (let [rects (mapv (fn [pn] (let [d (node-data pn)]
+                               [(:x1 d) (:y1 d) (:x2 d) (:y2 d)]))
+                    (filterv #(= "panel" (type-of %)) (:nodes page)))
+        frame (or (page-koma-bounds page)
+                  (let [nums (filterv #(every? number? %) rects)]
+                    (when (seq nums)
+                      {:x1 (apply min (map #(nth % 0) nums))
+                       :y1 (apply min (map #(nth % 1) nums))
+                       :x2 (apply max (map #(nth % 2) nums))
+                       :y2 (apply max (map #(nth % 3) nums))})))]
+    (mapv (fn [r] (when frame (normalize-rect r frame))) rects)))
