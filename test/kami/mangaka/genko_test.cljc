@@ -187,3 +187,36 @@
       (is (contains? d0 :weight))
       (is (contains? d0 :scale))
       (is (= :oval (:bubble d0))))))
+
+(deftest youshi-geometry-ssot
+  (testing "youshi 実寸 spec/導出 bounds の正本は genko(doc層)"
+    (is (= 4 (:koma (get g/youshi-templates "b4koma"))))
+    (is (false? (:draw (get g/youshi-templates "none"))))
+    (is (< (Math/abs (- (- (:x2 g/youshi-safe-bounds) (:x1 g/youshi-safe-bounds))
+                        (* 150.0 g/youshi-px-per-mm))) 1e-9))
+    (is (< (Math/abs (- (- (:y2 g/youshi-safe-bounds) (:y1 g/youshi-safe-bounds))
+                        (* 220.0 g/youshi-px-per-mm))) 1e-9))))
+
+(deftest panel-rects-normalized
+  (testing "youshi page: 内枠(=preset 分割領域)ちょうどの panel は [0 0 1 1]"
+    (let [{:keys [x1 y1 x2 y2]} g/youshi-safe-bounds
+          page (g/page "pg" "P" (g/youshi "y")
+                       [(g/panel-node "q1" {:x1 x1 :y1 y1 :x2 x2 :y2 y2})])]
+      (is (= [[0.0 0.0 1.0 1.0]] (g/page-panel-rects-normalized page)))))
+  (testing "koma-bounds: youshi page は内枠、none は nil"
+    (is (= g/youshi-safe-bounds
+           (g/page-koma-bounds (g/page "pg" "P" (g/youshi "y") []))))
+    (is (nil? (g/page-koma-bounds (g/page "pg" "P" (g/youshi "y" "none" true) [])))))
+  (testing "youshi 無し page は panel 群の外接 bbox 基準(相対レイアウト保存)"
+    (let [page (g/page "pg" "P" (g/youshi "y" "none" true)
+                       [(g/panel-node "q1" {:x1 0 :y1 0 :x2 100 :y2 100})
+                        (g/panel-node "q2" {:x1 0 :y1 100 :x2 100 :y2 200})])]
+      (is (= [[0.0 0.0 1.0 0.5] [0.0 0.5 1.0 0.5]]
+             (g/page-panel-rects-normalized page)))))
+  (testing "座標が欠けた panel は nil(storyboard の panel 順は保たれる)"
+    (let [page (g/page "pg" "P" (g/youshi "y")
+                       [(g/panel-node "q1" {:x1 nil :y1 nil :x2 nil :y2 nil})
+                        (g/panel-node "q2" {:x1 0 :y1 0 :x2 10 :y2 10})])
+          [r1 r2] (g/page-panel-rects-normalized page)]
+      (is (nil? r1))
+      (is (vector? r2)))))
