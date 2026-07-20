@@ -153,7 +153,8 @@
   (let [nodes (vec (get-in doc [:pages (or (:activePageIdx doc) 0) :nodes]))
         by-id (into {} (map (juxt g/nid-of identity)) nodes)
         panels (->> nodes (filter #(= "panel" (g/type-of %)))
-                    (sort-by #(get-in % [:data :panelName])))
+                    (sort-by #(let [n (get-in % [:data :panelName])]
+                                (or (parse-long (str n)) 9007199254740991))))
         projected
         (mapv
          (fn [idx panel]
