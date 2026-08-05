@@ -161,16 +161,16 @@
 
 ;; ── boot ─────────────────────────────────────────────────────────────────────
 (defn ^:export main []
-  (let [cv (js/document.getElementById "gl")]
-    ;; genko.html は fixed レイアウト(#bar/#side/#gl)なので composed [ui/editor]
-    ;; でなく個別 component + 静的 canvas への attach-canvas! を使う。
-    (ui/attach-canvas! cv adapter)
+  (let [mount (js/document.getElementById "app")]
+    ;; genko.html はもう fixed レイアウト(#bar/#side/#gl)を持たない — page は
+    ;; kotoba-ui の ->page で生成され、frame(toolbar / node tree / canvas)は
+    ;; [ui/editor] が app-shell {:fill true} として描く。canvas への attach と
+    ;; delegated listeners も editor 自身が did-mount で張るので、ここで配線
+    ;; するのは window スコープの keydown と永続化だけになった。
     (js/window.addEventListener "keydown"
       (fn [e] (when-let [a (ui/keydown-action e)] (dispatch! a))))
     (load-doc!) ; localStorage から復元(あれば)
-    (rdom/render [ui/toolbar adapter {:title "原稿 genko (cljs)"}]
-                 (js/document.getElementById "bar"))
-    (rdom/render [ui/tree adapter] (js/document.getElementById "side"))
+    (rdom/render [ui/editor adapter {:title "原稿 genko"}] mount)
     (add-watch state :autosave (fn [_ _ old new] (when (not= (:doc old) (:doc new)) (save-doc!))))
     (set! (.-genkoState js/globalThis) state) ; browser 検証フック
     (set! (.-genkoApi js/globalThis)          ; verification helpers

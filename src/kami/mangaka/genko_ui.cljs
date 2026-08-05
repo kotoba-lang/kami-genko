@@ -41,28 +41,35 @@
   [:set-doc doc]  ; import/load — selection と undo/redo stack をリセット
 
   doc を変え永続化が必要な action は `doc-action?` が true(host が autosave を
-  スケジュールする判定に使う)。"
+  スケジュールする判定に使う)。
+
+  ── chrome は kami.mangaka.genko-view (pure .cljc) ────────────────────────────
+  toolbar / node tree / editor frame の見た目は kotoba-lang design system
+  (kotoba-ui) の上に pure hiccup として `genko-view` にある。この ns が持つのは
+  「純 hiccup が持てないもの」だけ: WebGL2 renderer、canvas への pointer 接続、
+  keyboard、export/import の副作用、そして view が出す `data-act` を action に
+  戻す委譲リスナ (`attach-acts!`)。components 関数は view を reagent から
+  deref するだけの薄い wrapper。"
   (:require [reagent.core :as r]
             [reagent.ratom :as ratom]
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
+            [kami.mangaka.genko-view :as view]
             [kotoba.editor :as ed]
             [canvaskit.hit-test :as ckht]))
 
 ;; ── editor db ────────────────────────────────────────────────────────────────
 
-(defn initial-db
-  "editor db 初期値。doc 省略時は空 doc \"Mangaka\"。"
-  ([] (initial-db (g/new-doc "Mangaka" {:page-id (g/gen-nid) :youshi-id (g/gen-nid)})))
-  ([doc]
-   {:doc doc :undo-stack [] :redo-stack []
-    :tool "draw" :selection #{} :draft nil
-    :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"
-    :viewport gr/default-viewport :pan-from nil :kotoba-status nil}))
+(def initial-db
+  "editor db 初期値 — genko-view が正本 (pure .cljc; SSR ページ生成とテストも
+  同じ初期値を使う)。ここでは互換のため再輸出するだけ。"
+  view/initial-db)
 
 (defn- snap [db] (ed/snapshot db [:doc]))
-(defn active-idx [db] (get-in db [:doc :activePageIdx] 0))
-(defn active-nodes [db] (get-in db [:doc :pages (active-idx db) :nodes] []))
+;; genko-view が所有する (pure chrome も同じ accessor を要る)。genko-app と
+;; 外部の呼び手が既に `ui/active-nodes` を使っているのでここに残す。
+(def active-idx view/active-idx)
+(def active-nodes view/active-nodes)
 (defn- push-undo [db] (ed/push-undo db (snap db) ed/default-history-limit))
 
 (defn- add-nodes* [db nodes]
@@ -534,131 +541,122 @@
       (js/window.removeEventListener "pointerup" on-up)
       (.removeEventListener canvas "wheel" on-wheel))))
 
-;; ── reagent components ───────────────────────────────────────────────────────
+;; ── delegated interaction (data-act -> action) ───────────────────────────────
+;; `genko-view` returns pure hiccup, which cannot carry closures. It carries
+;; `data-act` instead — the design system's portable interaction attribute —
+;; and these listeners turn that back into dispatch!. One listener per event
+;; type for the whole editor, not one closure per element.
+;;
+;; Walking up to the nearest `[data-act]` ancestor also removes a special case:
+;; the per-node visibility toggle sits inside a row that is itself clickable,
+;; and used to need `.stopPropagation` so toggling would not also select. The
+;; nearest act now wins by construction.
 
-(def tool-names ["select" "draw" "panel" "fukidashi" "tone" "text"])
+(defn- closest-act
+  "The `data-act` of the nearest ancestor-or-self of the event target that has
+  one, or nil."
+  [e]
+  (some-> (.-target e) (.closest "[data-act]") (.getAttribute "data-act")))
+
+(defn- closest-row
+  "The tree row element (the nearest `[data-nid]`) under an event target."
+  [target]
+  (some-> target (.closest "[data-nid]")))
+
+(defn- drop-position
+  "drop 先 row の中心より上なら before、下なら after(HTML5 DnD 座標)。"
+  [row-el client-y]
+  (let [rect (.getBoundingClientRect row-el)
+        mid (/ (+ (.-top rect) (.-bottom rect)) 2)]
+    (if (< client-y mid) "before" "after")))
+
+(defn act-click-handler
+  "Delegated `click`: host effects (download / file picker / network) are run
+  here; everything else is a pure editor action and goes to dispatch!.
+  Keeping the two apart means a doc action can never be mistaken for a side
+  effect, or the reverse."
+  [{:keys [db* dispatch! sync]}]
+  (fn [e]
+    (when-let [act (closest-act e)]
+      (case act
+        "export"     (export-json! (:doc @db*))
+        "import"     (import-json! dispatch!)
+        "cloud-save" (when-let [f (:save! sync)] (f))
+        "cloud-load" (when-let [f (:load! sync)] (f))
+        (when-let [action (view/act->action act)] (dispatch! action))))))
+
+(defn act-change-handler
+  "Delegated `change`: the toolbar's `<select>`s. The コマ割り menu resets
+  itself to its placeholder row afterwards — the preset is an operation that
+  was applied once, not a property of the page the menu should keep showing."
+  [{:keys [dispatch!]}]
+  (fn [e]
+    (let [el (.-target e)
+          act (some-> el (.getAttribute "data-act"))
+          value (some-> el .-value)]
+      (when-let [action (view/change-act->action act value)]
+        (dispatch! action)
+        (when (= "panel-preset" act) (set! (.-value el) ""))))))
+
+(defn attach-acts!
+  "Install the delegated listeners on an editor root element (drag included:
+  HTML5 DnD events bubble, so the tree needs no per-row handlers either).
+  → detach fn."
+  [root adapter]
+  (let [dispatch! (:dispatch! adapter)
+        on-click (act-click-handler adapter)
+        on-change (act-change-handler adapter)
+        on-dragstart (fn [e]
+                       (when-let [row (closest-row (.-target e))]
+                         (.setData (.-dataTransfer e) "text/plain"
+                                   (.getAttribute row "data-nid"))))
+        on-dragover (fn [e] (when (closest-row (.-target e)) (.preventDefault e)))
+        on-drop (fn [e]
+                  (when-let [row (closest-row (.-target e))]
+                    (.preventDefault e)
+                    (let [from (.getData (.-dataTransfer e) "text/plain")
+                          to (.getAttribute row "data-nid")]
+                      (when (and (seq from) (not= from to))
+                        (dispatch! [:reorder from to (drop-position row (.-clientY e))])))))]
+    (.addEventListener root "click" on-click)
+    (.addEventListener root "change" on-change)
+    (.addEventListener root "dragstart" on-dragstart)
+    (.addEventListener root "dragover" on-dragover)
+    (.addEventListener root "drop" on-drop)
+    (fn detach! []
+      (.removeEventListener root "click" on-click)
+      (.removeEventListener root "change" on-change)
+      (.removeEventListener root "dragstart" on-dragstart)
+      (.removeEventListener root "dragover" on-dragover)
+      (.removeEventListener root "drop" on-drop))))
+
+;; ── reagent components ───────────────────────────────────────────────────────
+;; Thin: deref the adapter's db* (that deref is what makes the component
+;; reactive) and hand the plain db to the pure view.
+;;
+;; `toolbar` and `tree` are still exported for hosts that place them
+;; separately, but they emit `data-act` and nothing else — such a host must
+;; call `attach-acts!` on a common ancestor itself. `editor` does it for you.
+
+(def tool-names view/tool-names)
 
 (defn toolbar
   "editor toolbar。opts: {:title str-or-nil} — :sync ボタン(☁)は adapter の
   :sync が在るときだけ出る(status は db の :kotoba-status)。"
-  [{:keys [db* dispatch! sync]} & [{:keys [title]}]]
-  (let [db @db*]
-    (when db
-      [:div {:style {:display "flex" :gap "6px" :padding "6px" :align-items "center"
-                     :background "#111" :color "#fff" :font "13px sans-serif"
-                     :flex-wrap "wrap"}}
-       (when title [:b title])
-       (for [t tool-names]
-         ^{:key t}
-         [:button {:on-click #(dispatch! [:set-tool t])
-                   :style {:padding "4px 8px" :border-radius "6px" :cursor "pointer"
-                           :background (if (= t (:tool db)) "#e06090" "#333") :color "#fff" :border "none"}}
-          t])
-       ;; 原稿用紙 template (embed の youshiType select と同じ選択肢/表記)
-       [:select {:value (or (get-in db [:doc :pages (active-idx db) :youshi :type]) "none")
-                 :title "原稿用紙"
-                 :on-change #(dispatch! [:set-youshi-type (.. % -target -value)])
-                 :style {:padding "4px" :border-radius "6px"}}
-        [:option {:value "b4manga"} "B4 漫画"]
-        [:option {:value "b4koma"} "4コマ"]
-        [:option {:value "none"} "Free"]]
-       [:select {:value "" :title "コマ割りプリセット"
-                 :on-change (fn [e]
-                              (let [v (.. e -target -value)]
-                                (when (seq v) (dispatch! [:apply-preset v]))
-                                (set! (.. e -target -value) "")))
-                 :style {:padding "4px" :border-radius "6px"}}
-        [:option {:value ""} "コマ割り…"]
-        (for [k ["1" "2h" "2v" "3h" "2x2"]]
-          ^{:key k} [:option {:value k} k])]
-       (when (= "fukidashi" (:tool db))
-         [:select {:key "fuki-type" :value (:fuki-type db) :title "吹き出し種別"
-                   :on-change #(dispatch! [:set-fuki-type (.. % -target -value)])
-                   :style {:padding "4px" :border-radius "6px"}}
-          (for [ft (sort g/fukidashi-types)] ^{:key ft} [:option {:value ft} ft])])
-       (when (= "fukidashi" (:tool db))
-         [:select {:key "fuki-tail" :value (:fuki-tail db) :title "しっぽの向き"
-                   :on-change #(dispatch! [:set-fuki-tail (.. % -target -value)])
-                   :style {:padding "4px" :border-radius "6px"}}
-          (for [ft (sort g/fukidashi-tails)] ^{:key ft} [:option {:value ft} ft])])
-       (when (= "tone" (:tool db))
-         [:select {:key "tone-pattern" :value (:tone-pattern db) :title "トーンパターン"
-                   :on-change #(dispatch! [:set-tone-pattern (.. % -target -value)])
-                   :style {:padding "4px" :border-radius "6px"}}
-          (for [tp (sort g/tone-patterns)] ^{:key tp} [:option {:value tp} tp])])
-       [:span {:style {:flex "1"}}]
-       [:button {:on-click #(export-json! (:doc @db*)) :style {:padding "4px 8px"}} "⇩ export"]
-       [:button {:on-click #(import-json! dispatch!) :style {:padding "4px 8px"}} "⇧ import"]
-       (when sync
-         [:<>
-          [:button {:on-click (:save! sync) :title (:title sync)
-                    :style {:padding "4px 8px"}} "☁ save"]
-          [:button {:on-click (:load! sync) :title (:title sync)
-                    :style {:padding "4px 8px"}} "☁ load"]
-          (when-let [st (:kotoba-status db)]
-            [:span {:style {:opacity 0.8 :color (if (vector? st) "#e06060" "#8fdc8f")}}
-             (case st :saving "…" :saved "☁✓" :loading "…" :loaded "☁✓"
-                   (str "☁✗ " (second st)))])])
-       [:button {:on-click #(dispatch! [:undo]) :disabled (not (ed/can-undo? db))
-                 :style {:padding "4px 8px"}} "↶ undo"]
-       [:button {:on-click #(dispatch! [:redo]) :disabled (not (ed/can-redo? db))
-                 :style {:padding "4px 8px"}} "↷ redo"]
-       [:button {:on-click #(dispatch! [:reset-viewport])
-                 :title "空白ドラッグ=pan、ホイール=zoom"
-                 :style {:padding "4px 8px"}} "⌂ view"]
-       [:span {:style {:margin-left "8px" :opacity 0.7}}
-        (str (count (active-nodes db)) " nodes · " (.toFixed (* 100 (:zoom (:viewport db))) 0) "%")]])))
-
-(defn- drop-position
-  "drop 先 row の中心より上なら before、下なら after(HTML5 DnD dragover 座標)。"
-  [e]
-  (let [rect (.getBoundingClientRect (.-currentTarget e))
-        mid (/ (+ (.-top rect) (.-bottom rect)) 2)]
-    (if (< (.-clientY e) mid) "before" "after")))
+  [{:keys [db* sync]} & [{:keys [title]}]]
+  (when-let [db @db*]
+    (view/toolbar-view db {:title title :sync? (boolean sync)})))
 
 (defn tree
   "node tree(drag 並べ替え・可視トグル・click 選択)。"
-  [{:keys [db* dispatch!]}]
-  (let [db @db*]
-    (when db
-      (let [rows (g/all-nodes (active-nodes db))
-            youshi (get-in db [:doc :pages (active-idx db) :youshi])]
-        [:div {:style {:width "200px" :padding "6px" :font "12px sans-serif" :overflow "auto"
-                       :border-right "1px solid #ccc" :background "#faf7f0"}}
-         [:div {:style {:font-weight "bold" :margin-bottom "4px"}} "Nodes"]
-         ;; 原稿用紙は page 直下の特別ノード — embed の node tree と同じく
-         ;; `genkouyoushi (<type>)` の行を先頭に出す(眼アイコンで表示トグル)。
-         (when youshi
-           (let [vis? (not (false? (:visible youshi)))]
-             [:div {:style {:padding "2px 4px" :border-radius "4px"
-                            :display "flex" :align-items "center" :gap "4px"
-                            :opacity (if vis? 1 0.4)}}
-              [:span {:on-click #(dispatch! [:toggle-youshi-vis])
-                      :style {:cursor "pointer"}
-                      :title "表示/非表示"} (if vis? "👁" "🚫")]
-              [:span (str "genkouyoushi (" (or (:type youshi) "none") ")")]]))
-         (for [row rows]
-           ^{:key (:nid row)}
-           [:div {:draggable true
-                  :on-drag-start (fn [e] (.setData (.-dataTransfer e) "text/plain" (:nid row)))
-                  :on-drag-over (fn [e] (.preventDefault e))
-                  :on-drop (fn [e]
-                             (.preventDefault e)
-                             (let [from (.getData (.-dataTransfer e) "text/plain")]
-                               (when (and (seq from) (not= from (:nid row)))
-                                 (dispatch! [:reorder from (:nid row) (drop-position e)]))))
-                  :on-click #(dispatch! [:select-node (:nid row)])
-                  :style {:padding "2px 4px" :cursor "grab" :border-radius "4px"
-                          :display "flex" :align-items "center" :gap "4px"
-                          :opacity (if (:vis row) 1 0.4)
-                          :background (if (contains? (:selection db) (:nid row)) "#cfe3ff" "transparent")}}
-            [:span {:on-click (fn [e] (.stopPropagation e) (dispatch! [:toggle-vis (:nid row)]))
-                    :title "表示/非表示"} (if (:vis row) "👁" "🚫")]
-            [:span (:nm row)]])]))))
+  [{:keys [db*]}]
+  (when-let [db @db*]
+    (view/tree-view db)))
 
 (defn canvas
   "WebGL2 canvas component(attach-canvas! を did-mount で接続、unmount で detach)。
-  attribute 解像度は 1000x720 固定(world 座標系の前提)、表示サイズは :style で。"
+  attribute 解像度は 1000x720 固定(world 座標系の前提)、表示サイズは CSS
+  (.genko-canvas)。"
   [adapter & [_opts]]
   (let [el (atom nil) detach (atom nil)]
     (r/create-class
@@ -668,25 +666,31 @@
       :component-will-unmount
       (fn [_] (when-let [d @detach] (d) (reset! detach nil)))
       :reagent-render
-      (fn [_adapter & [{:keys [width height style class]}]]
-        [:canvas {:ref #(reset! el %)
-                  :width (or width 1000) :height (or height 720)
-                  :class class
-                  :style (merge {:touch-action "none" :cursor "crosshair"
-                                 :background "#f0ead6" :display "block"}
-                                style)}])})))
+      (fn [_adapter & [{:keys [width height id]}]]
+        (-> (view/canvas-view {:width width :height height :id id})
+            (update 1 assoc :ref #(reset! el %))))})))
 
 (defn editor
-  "toolbar + node tree + canvas を組んだ埋め込み用レイアウト(ページ内 mount 向け。
-  スタンドアロン genko.html は fixed レイアウトなので個別 component を使う)。
-  opts: {:title :height :style :canvas-style}"
-  [adapter & [{:keys [title height style canvas-style]}]]
-  [:div {:style (merge {:display "flex" :flex-direction "column"
-                        :height (or height "70vh") :min-height "480px"
-                        :background "#f0ead6"}
-                       style)}
-   [toolbar adapter {:title title}]
-   [:div {:style {:display "flex" :flex "1" :min-height "0"}}
-    [tree adapter]
-    [:div {:style {:flex "1" :min-width "0" :overflow "hidden"}}
-     [canvas adapter {:style (merge {:width "100%" :height "100%"} canvas-style)}]]]])
+  "toolbar + node tree + canvas を組んだ埋め込み用レイアウト。`app-shell
+  {:fill true}` の editor frame なので、置かれた箱の高さいっぱいに広がる。
+  canvas への attach と delegated listeners は root の did-mount で張る。
+  opts: {:title}"
+  [adapter & [_opts]]
+  (let [root (atom nil) detach-acts (atom nil) detach-canvas (atom nil)]
+    (r/create-class
+     {:display-name "genko-editor"
+      :component-did-mount
+      (fn [_]
+        (when-let [el @root]
+          (reset! detach-acts (attach-acts! el adapter))
+          (when-let [cv (.querySelector el "canvas.genko-canvas")]
+            (reset! detach-canvas (attach-canvas! cv adapter)))))
+      :component-will-unmount
+      (fn [_]
+        (when-let [d @detach-acts] (d) (reset! detach-acts nil))
+        (when-let [d @detach-canvas] (d) (reset! detach-canvas nil)))
+      :reagent-render
+      (fn [{:keys [db* sync]} & [{:keys [title]}]]
+        (when-let [db @db*]
+          (-> (view/editor-view db {:title title :sync? (boolean sync)})
+              (update 1 assoc :ref #(reset! root %)))))})))
