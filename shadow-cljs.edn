@@ -16,12 +16,8 @@
                   :asset-path "."
                   :modules    {:kami-genko {:init-fn kami.mangaka.genko-js/install!}}}
           :app   {:target     :browser
-                  ;; Published at itonami.cloud/genko, so the bundle lives under
-                  ;; that prefix and is referenced absolutely — a path route
-                  ;; serves assets from the worker's directory root, so the
-                  ;; prefix has to exist on disk rather than be stripped.
-                  :output-dir "public/genko/js"
-                  :asset-path "/genko/js"
+                  :output-dir "public/js"
+                  :asset-path "/js"
                   :modules    {:genko-app {:init-fn kami.mangaka.genko-app/main}}}
           :kotobase-test
           {:target :node-test
