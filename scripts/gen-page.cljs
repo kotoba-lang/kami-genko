@@ -1,5 +1,5 @@
 (ns gen-page
-  "Generate `public/genko.html` — the standalone editor's host page.
+  "Generate `public/index.html` — the standalone editor's host page.
 
   The page used to be hand-written HTML carrying its own `#f0ead6` background,
   its own font stack, and three `position: fixed` boxes (#bar / #side / #gl)
@@ -23,7 +23,11 @@
             [kami.mangaka.genko-view :as view]
             [kami.mangaka.genko-theme :as theme]))
 
-(def out-path "public/genko.html")
+(def out-path
+  "index.html, not genko.html: this page is now published (genko.gftd.ai), and
+  a web host wants the document its bare path resolves to. Nothing outside
+  this repo ever linked to the old name."
+  "public/index.html")
 
 (defn page []
   (ui/->page
@@ -44,10 +48,10 @@
         current (when (fs/existsSync out-path) (str (fs/readFileSync out-path "utf8")))]
     (cond
       (and check? (= current html))
-      (println "genko.html up to date")
+      (println "index.html up to date")
 
       check?
-      (do (println "STALE: public/genko.html differs from its generator."
+      (do (println "STALE: public/index.html differs from its generator."
                    "Run: nbb scripts/gen-page.cljs")
           (process/exit 1))
 

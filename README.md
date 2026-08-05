@@ -85,7 +85,7 @@ npm run test:genko-query     # genko-query の JVM/cljs 両対応 portability ch
 
 ## cljs-only genko エディタ (`kami.mangaka.genko-app`)
 
-`npx shadow-cljs release app` → `public/genko.html`。WebGL2 / reagent の全機能
+`npx shadow-cljs release app` + `npm run page` → `public/index.html`。WebGL2 / reagent の全機能
 エディタ（ツール一式・コマ割りプリセット・pentab 筆圧・pan/zoom・node-tree）に加え、
 kotoba-server(kotobase.net) への永続を任意同期(「☁ save」/「☁ load」ボタン)として搭載。
 

@@ -11,7 +11,7 @@
 
   Run (after `shadow-cljs release app` and `nbb scripts/gen-page.cljs`, with
   public/ served):
-    GENKO_URL=http://localhost:8731/genko.html \\
+    GENKO_URL=http://localhost:8731/ \\
       npx nbb --classpath <cp> scripts/verify-browser.cljs"
   (:require ["node:process" :as process]
             ["playwright-core$default" :as pw]
@@ -19,7 +19,7 @@
 
 ;; From the environment, not argv: `--classpath <cp>` shifts argv, and reading
 ;; a fixed index there navigated the browser to the classpath string.
-(def url (or (.. process -env -GENKO_URL) "http://localhost:8731/genko.html"))
+(def url (or (.. process -env -GENKO_URL) "http://localhost:8731/"))
 
 (defonce results (atom []))
 
