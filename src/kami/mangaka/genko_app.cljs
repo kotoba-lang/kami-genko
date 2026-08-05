@@ -170,7 +170,7 @@
     (js/window.addEventListener "keydown"
       (fn [e] (when-let [a (ui/keydown-action e)] (dispatch! a))))
     (load-doc!) ; localStorage から復元(あれば)
-    (rdom/render [ui/editor adapter {:title "原稿 genko"}] mount)
+    (rdom/render [ui/editor adapter] mount)
     (add-watch state :autosave (fn [_ _ old new] (when (not= (:doc old) (:doc new)) (save-doc!))))
     (set! (.-genkoState js/globalThis) state) ; browser 検証フック
     (set! (.-genkoApi js/globalThis)          ; verification helpers
@@ -191,8 +191,14 @@
                :nodeCount (fn [] (count (active-nodes @state)))
                :nodeTypes (fn [] (clj->js (mapv g/type-of (active-nodes @state))))
                :nodeIds (fn [] (clj->js (mapv g/nid-of (active-nodes @state))))
+               ;; `node-visible?` takes [nodes nid]; the seq here is ALREADY nids, so
+               ;; the old `(g/nid-of %)` fed it a string, got nil, and node-visible?
+               ;; returns true for an id it cannot find — the filter passed every
+               ;; node unconditionally and this helper reported nothing was ever
+               ;; hidden. Found when a browser check watched the eye glyph flip to
+               ;; 🚫 while this still said the node was visible.
                :visibleNodeIds (fn [] (let [ns (active-nodes @state)]
-                                         (clj->js (filterv #(g/node-visible? ns (g/nid-of %)) (mapv g/nid-of ns)))))
+                                         (clj->js (filterv #(g/node-visible? ns %) (mapv g/nid-of ns)))))
                :applyPreset apply-panel-preset!
                :toggleVis toggle-vis!
                :reorderNode reorder-node!

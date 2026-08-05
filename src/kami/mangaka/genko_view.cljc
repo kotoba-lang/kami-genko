@@ -160,21 +160,36 @@
           (str "☁✗ " (second status)))
         {:class (when error? "genko-status--error")})])))
 
+(defn tools-view
+  "The tool palette: a segmented control over `tool-names`.
+
+  It sits in the toolbar. Moving it to the sidebar was tried and reverted —
+  `tab-bar` is a horizontal segmented control that does not wrap, so in a
+  260px column the six Japanese labels compressed to one character per line
+  and the last tab was clipped off the edge. A vertical tool palette needs a
+  vertical component, and the design system does not have one today (noted as
+  a gap rather than worked around with app CSS)."
+  [db]
+  (ui/tab-bar (mapv (fn [t] [(keyword "tool" t) (get tool-labels t t)]) tool-names)
+              (keyword "tool" (:tool db))
+              {:class "genko-tools"}))
+
 (defn toolbar-view
-  "Editor toolbar. `db` is the editor db; opts `{:title :sync?}` — `:sync?`
-  shows the cloud save/load pair (the host only has those when its adapter
-  carries a `:sync`)."
+  "Editor toolbar — document-scope controls only. `db` is the editor db; opts
+  `{:sync?}` shows the cloud save/load pair (the host only has those when its
+  adapter carries a `:sync`).
+
+  No title: the page's own `<title>` already names the document, and a label
+  in here only pushed the controls onto a second row."
   ([db] (toolbar-view db nil))
-  ([db {:keys [title sync?]}]
+  ([db {:keys [sync?]}]
    (let [tool (:tool db)
          youshi (active-youshi db)
          zoom (get-in db [:viewport :zoom] 1.0)]
      (ui/toolbar
       (remove
        nil?
-       [(when title [:strong {:class "hig-subheadline"} title])
-        (ui/tab-bar (mapv (fn [t] [(keyword "tool" t) (get tool-labels t t)]) tool-names)
-                    (keyword "tool" tool))
+       [(tools-view db)
         ;; None of these dropdowns has a visible <label> (a toolbar has no room
         ;; for six of them), so each states its own name through :attrs. That
         ;; opt had to be added to shitsuke.components/select first — it used to
@@ -261,6 +276,19 @@
        (map (fn [row] (node-row row (contains? selection (:nid row)))) rows)))
      {:class "genko-tree"})))
 
+(defn sidebar-view
+  "The side panel: tool palette above, node tree below. `stack` is the shell's
+  vertical scaffold — the alternative was a hand-written flex column, which is
+  the layout CSS rule 4 forbids."
+  [db]
+  ;; No :gap — the stack's own default already comes from a spacing token, and
+  ;; naming one here would emit an inline style. It would be a *token-valued*
+  ;; style, so it breaks no rule, but "the chrome renders zero style attributes"
+  ;; is a sharper invariant to hold than "…only token-valued ones", and the
+  ;; test holds it.
+  (ui/stack {:class "genko-sidebar"}
+            (tree-view db)))
+
 ;; ── canvas + frame ───────────────────────────────────────────────────────────
 
 (defn canvas-view
@@ -284,8 +312,8 @@
   ([db {:keys [canvas] :as opts}]
    (ui/app-shell
     {:fill true
-     :nav (toolbar-view db (select-keys opts [:title :sync?]))
-     :sidebar (tree-view db)
+     :nav (toolbar-view db (select-keys opts [:sync?]))
+     :sidebar (sidebar-view db)
      :class "genko-editor"}
     (canvas-view canvas))))
 

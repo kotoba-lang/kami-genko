@@ -29,9 +29,9 @@
     ;; (#111 toolbar, #e06090 active tool, #faf7f0 sidebar, #cfe3ff selection,
     ;; #e06060/#8fdc8f status, …). Colors are the design system's decision;
     ;; the editor's single legitimate hex is the accent in genko-theme.
-    (doseq [[label out] {"toolbar" (html (view/toolbar-view (db) {:title "原稿" :sync? true}))
+    (doseq [[label out] {"toolbar" (html (view/toolbar-view (db) {:sync? true}))
                          "tree"    (html (view/tree-view (db)))
-                         "editor"  (html (view/editor-view (db) {:title "原稿"}))}]
+                         "editor"  (html (view/editor-view (db)))}]
       (is (nil? (re-find hex-color-re out))
           (str label " leaked a raw hex color: " (re-find hex-color-re out)))))
   (testing "no inline style attribute — layout comes from the shell, not from here"
@@ -105,14 +105,10 @@
 ;; ── rendered structure ───────────────────────────────────────────────────────
 
 (deftest toolbar-view-test
-  (let [out (html (view/toolbar-view (db {:tool "tone"}) {:title "原稿" :sync? true}))]
+  (let [out (html (view/toolbar-view (db {:tool "tone"}) {:sync? true}))]
     (testing "built from design-system components, not hand-rolled elements"
       (is (str/includes? out "liquid-glass__toolbar"))
-      (is (str/includes? out "liquid-glass__tab-bar"))
       (is (str/includes? out "liquid-glass__button")))
-    (testing "the active tool is the active tab"
-      (is (str/includes? out "liquid-glass__tab liquid-glass__tab--active"))
-      (is (str/includes? out "data-act=\"tool/tone\"")))
     (testing "unlabeled dropdowns name themselves (shitsuke select :attrs)"
       (is (str/includes? out "aria-label=\"原稿用紙\""))
       (is (str/includes? out "aria-label=\"コマ割り\""))
@@ -127,8 +123,23 @@
     (testing "undo/redo are disabled with an empty history rather than dead"
       (is (str/includes? out "disabled")))
     (testing "typography is HIG text styles"
-      (is (str/includes? out "hig-subheadline"))
       (is (str/includes? out "hig-caption1")))))
+
+(deftest tools-view-test
+  (testing "the tool palette is a segmented control in the toolbar"
+    (let [tools (html (view/tools-view (db {:tool "tone"})))
+          bar   (html (view/toolbar-view (db {:tool "tone"})))]
+      (is (str/includes? tools "liquid-glass__tab-bar"))
+      (is (str/includes? tools "liquid-glass__tab liquid-glass__tab--active"))
+      (is (str/includes? tools "data-act=\"tool/tone\""))
+      ;; It belongs to the toolbar, not the sidebar: tab-bar does not wrap, and
+      ;; in a 260px column the six labels collapse to one character per line.
+      (is (str/includes? bar "liquid-glass__tab-bar"))
+      (is (not (str/includes? (html (view/sidebar-view (db))) "liquid-glass__tab-bar")))))
+  (testing "the sidebar is the node tree, built from the shell's stack"
+    (let [out (html (view/sidebar-view (db)))]
+      (is (str/includes? out "kotoba-shell__stack"))
+      (is (str/includes? out "liquid-glass__list")))))
 
 (deftest sync-status-test
   (testing "an async result announces itself"
@@ -163,7 +174,7 @@
       (is (str/includes? out "data-act=\"toggle-youshi-vis\"")))))
 
 (deftest editor-view-test
-  (let [out (html (view/editor-view (db) {:title "原稿"}))]
+  (let [out (html (view/editor-view (db)))]
     (testing "the editor frame, not a document"
       (is (str/includes? out "kotoba-shell__app--fill")))
     (testing "toolbar is the nav, tree is the sidebar, canvas is the content"

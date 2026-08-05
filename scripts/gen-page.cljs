@@ -35,7 +35,7 @@
     ;; system's bundle so the unlayered app rules win (agent-guide rule 3).
     :head [:style [:hiccup/raw (str view/app-css theme/full-page-css)]]}
    [:div {:id "app"}
-    (view/editor-view (view/initial-db) {:title "原稿 genko"})]
+    (view/editor-view (view/initial-db))]
    [:script {:src "js/genko-app.js"}]))
 
 (defn -main [& args]
