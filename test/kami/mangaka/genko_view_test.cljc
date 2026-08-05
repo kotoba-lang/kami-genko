@@ -4,7 +4,7 @@
   makes these assertions possible, so they are part of the same change."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
-            [kotoba-ui.core :as ui]
+            [html.core :as html]
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-view :as view]))
 
@@ -15,7 +15,7 @@
    (merge (view/initial-db (g/new-doc "T" {:page-id "p1" :youshi-id "y1"}))
           overrides)))
 
-(defn- html [hic] (ui/->html hic))
+(defn- html [hic] (html/->html hic))
 
 ;; ── the property this whole ns exists to hold ────────────────────────────────
 
@@ -47,10 +47,17 @@
     ;; what the WebGL renderer actually paints.
     (is (nil? (re-find hex-color-re view/app-css)))
     (is (str/includes? view/app-css "var(--hig-color-tertiary-label)"))
-    (is (str/includes? view/app-css "var(--hig-palette-red)"))
-    (is (str/includes? view/app-css "var(--hig-color-secondary-label)")))
-  (testing "the stylesheet stays small — it is four rules, not a second design system"
-    (is (< (count (str/split-lines (str/trim view/app-css))) 10))))
+    (is (str/includes? view/app-css "var(--hig-color-secondary-label)"))
+    (is (str/includes? view/app-css "var(--hig-spacing-2)"))
+    (is (str/includes? view/app-css "var(--hig-radius-sm)")))
+  (testing "the stylesheet stays small — an editor frame, not a second design system"
+    ;; It grew from 4 rules to ~15 when the base changed. That is the honest
+    ;; cost of leaving kotoba-ui: `app-shell {:fill true}` supplied the
+    ;; viewport-bounded frame, and DADS's dds-ext-* layer is government-site
+    ;; shaped (container / section / grid / stack / row / card) with no editor
+    ;; frame in it. The bound is here to catch a second design system creeping
+    ;; back in, not to pretend the frame is free.
+    (is (< (count (str/split-lines (str/trim view/app-css))) 25))))
 
 ;; ── act vocabulary ───────────────────────────────────────────────────────────
 
@@ -107,8 +114,8 @@
 (deftest toolbar-view-test
   (let [out (html (view/toolbar-view (db {:tool "tone"}) {:sync? true}))]
     (testing "built from design-system components, not hand-rolled elements"
-      (is (str/includes? out "liquid-glass__toolbar"))
-      (is (str/includes? out "liquid-glass__button")))
+      (is (str/includes? out "genko-toolbar"))
+      (is (str/includes? out "dads-button")))
     (testing "unlabeled dropdowns name themselves (shitsuke select :attrs)"
       (is (str/includes? out "aria-label=\"原稿用紙\""))
       (is (str/includes? out "aria-label=\"コマ割り\""))
@@ -122,24 +129,27 @@
       (is (not (str/includes? (html (view/toolbar-view (db))) "data-act=\"cloud-save\""))))
     (testing "undo/redo are disabled with an empty history rather than dead"
       (is (str/includes? out "disabled")))
-    (testing "typography is HIG text styles"
-      (is (str/includes? out "hig-caption1")))))
+    (testing "the readout is sized by token, not by a utility class"
+      ;; `.hig-*` utility classes came from shitsuke and do not exist on this
+      ;; base; the size is a token reference in app-css instead.
+      (is (not (str/includes? out "hig-caption1")))
+      (is (str/includes? out "genko-readout")))))
 
 (deftest tools-view-test
   (testing "the tool palette is a segmented control in the toolbar"
     (let [tools (html (view/tools-view (db {:tool "tone"})))
           bar   (html (view/toolbar-view (db {:tool "tone"})))]
-      (is (str/includes? tools "liquid-glass__tab-bar"))
-      (is (str/includes? tools "liquid-glass__tab liquid-glass__tab--active"))
+      (is (str/includes? tools "genko-tools"))
+      (is (str/includes? tools "data-type=\"solid-fill\""))
       (is (str/includes? tools "data-act=\"tool/tone\""))
       ;; It belongs to the toolbar, not the sidebar: tab-bar does not wrap, and
       ;; in a 260px column the six labels collapse to one character per line.
-      (is (str/includes? bar "liquid-glass__tab-bar"))
-      (is (not (str/includes? (html (view/sidebar-view (db))) "liquid-glass__tab-bar")))))
+      (is (str/includes? bar "genko-tools"))
+      (is (not (str/includes? (html (view/sidebar-view (db))) "genko-tools")))))
   (testing "the sidebar is the node tree, built from the shell's stack"
     (let [out (html (view/sidebar-view (db)))]
-      (is (str/includes? out "kotoba-shell__stack"))
-      (is (str/includes? out "liquid-glass__list")))))
+      (is (str/includes? out "genko-sidebar"))
+      (is (str/includes? out "genko-tree")))))
 
 (deftest sync-status-test
   (testing "an async result announces itself"
@@ -147,10 +157,17 @@
       (is (str/includes? out "role=\"status\""))
       (is (str/includes? out "aria-live=\"polite\""))
       (is (str/includes? out "☁✓"))))
-  (testing "an error is marked by class, so its color comes from a token"
+  (testing "an error is a red DADS chip, not an app-invented colour"
+    ;; Previously a `.genko-status--error` class pointing at --hig-palette-red.
+    ;; DADS's chip-label already has the states, so the app states which one it
+    ;; is and stops owning the colour.
     (let [out (html (view/toolbar-view (db {:kotoba-status [:error "boom"]}) {:sync? true}))]
-      (is (str/includes? out "genko-status--error"))
-      (is (str/includes? out "boom")))))
+      (is (str/includes? out "dads-chip-label"))
+      (is (str/includes? out "data-color=\"red\""))
+      (is (str/includes? out "boom"))))
+  (testing "a settled state is the neutral chip"
+    (is (str/includes? (html (view/toolbar-view (db {:kotoba-status :saved}) {:sync? true}))
+                       "data-color=\"blue\""))))
 
 (deftest tree-view-test
   (let [d (-> (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
@@ -158,8 +175,8 @@
                                            (g/panel-node "n2" {:x1 1 :y1 1 :x2 2 :y2 2})]))
         out (html (view/tree-view (db {:doc d :selection #{"n2"}})))]
     (testing "a glass list, not a hand-built div stack"
-      (is (str/includes? out "liquid-glass__list"))
-      (is (str/includes? out "role=\"listitem\"")))
+      (is (str/includes? out "<ul class=\"genko-tree\""))
+      (is (str/includes? out "<li class=\"genko-node\"")))
     (testing "selection is announced, not only colored"
       (is (str/includes? out "aria-selected=\"true\""))
       (is (str/includes? out "aria-selected=\"false\"")))
@@ -173,14 +190,24 @@
       (is (str/includes? out "genkouyoushi"))
       (is (str/includes? out "data-act=\"toggle-youshi-vis\"")))))
 
+(deftest hiccup-shape-the-reagent-host-depends-on-test
+  (testing "index 1 of editor-view / canvas-view is the attrs map"
+    ;; genko-ui/editor and /canvas attach their refs with
+    ;; `(update 1 assoc :ref …)`. If index 1 is a child vector instead,
+    ;; reagent throws "Vector's key for assoc must be a number" and the editor
+    ;; renders nothing — which is exactly what happened when the frame stopped
+    ;; going through a component that always emitted attrs.
+    (is (map? (nth (view/editor-view (db)) 1)))
+    (is (map? (nth (view/canvas-view) 1)))))
+
 (deftest editor-view-test
   (let [out (html (view/editor-view (db)))]
     (testing "the editor frame, not a document"
-      (is (str/includes? out "kotoba-shell__app--fill")))
+      (is (str/includes? out "genko-editor")))
     (testing "toolbar is the nav, tree is the sidebar, canvas is the content"
-      (is (str/includes? out "kotoba-shell__app-nav"))
-      (is (str/includes? out "kotoba-shell__app-sidebar"))
-      (is (str/includes? out "<main class=\"kotoba-shell__app-main\"")))
+      (is (str/includes? out "genko-toolbar"))
+      (is (str/includes? out "<aside class=\"genko-sidebar\""))
+      (is (str/includes? out "<main class=\"genko-main\"")))
     (testing "the canvas keeps the world-coordinate contract genko-render assumes"
       (is (str/includes? out "width=\"1000\""))
       (is (str/includes? out "height=\"720\"")))))

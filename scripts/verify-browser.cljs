@@ -11,15 +11,16 @@
 
   Run (after `shadow-cljs release app` and `nbb scripts/gen-page.cljs`, with
   public/ served):
-    GENKO_URL=http://localhost:8731/ \\
+    GENKO_URL=http://localhost:8734/ \\
       npx nbb --classpath <cp> scripts/verify-browser.cljs"
   (:require ["node:process" :as process]
             ["playwright-core$default" :as pw]
+            [clojure.string :as str]
             [promesa.core :as p]))
 
 ;; From the environment, not argv: `--classpath <cp>` shifts argv, and reading
 ;; a fixed index there navigated the browser to the classpath string.
-(def url (or (.. process -env -GENKO_URL) "http://localhost:8731/"))
+(def url (or (.. process -env -GENKO_URL) "http://localhost:8734/"))
 
 (defonce results (atom []))
 
@@ -55,9 +56,13 @@
    ;; DELEGATED CLICK — a tool tab must reach dispatch! and change :tool.
    (fn [] (p/let [_ (.click page "[data-act='tool/panel']")
                   _ (settle page)
-                  cls (.getAttribute (.first (.locator page "[data-act='tool/panel']")) "class")]
-            (check! "delegated click: tool tab becomes active"
-                    (re-find #"tab--active" (str cls)) cls)))
+                  t (.getAttribute (.first (.locator page "[data-act='tool/panel']")) "data-type")
+                  pressed (.getAttribute (.first (.locator page "[data-act='tool/panel']")) "aria-pressed")]
+            ;; DADS says "current" with the button's own type, not a separate
+            ;; segmented-control class.
+            (check! "delegated click: tool button becomes the current one"
+                    (and (= "solid-fill" (str t)) (= "true" (str pressed)))
+                    (str t " / " pressed))))
 
    ;; DELEGATED CHANGE — the コマ割り <select> must apply a preset.
    (fn [] (p/let [before (.evaluate page "globalThis.genkoApi.nodeCount()")
@@ -115,14 +120,30 @@
                     (= "true" v) (pr-str v))))
 
    ;; :fill really bounds the frame — the page must not scroll.
-   (fn [] (p/let [m (.evaluate page "(() => { const a = document.querySelector('.kotoba-shell__app--fill'); const r = a.getBoundingClientRect(); return {h: Math.round(r.height), vh: window.innerHeight, scrolls: document.documentElement.scrollHeight > window.innerHeight + 1}; })()")]
+   (fn [] (p/let [m (.evaluate page "(() => { const a = document.querySelector('.genko-editor'); const r = a.getBoundingClientRect(); return {h: Math.round(r.height), vh: window.innerHeight, scrolls: document.documentElement.scrollHeight > window.innerHeight + 1}; })()")]
             (let [m (js->clj m :keywordize-keys true)]
               (check! "editor frame fills the viewport and the page does not scroll"
                       (and (= (:h m) (:vh m)) (not (:scrolls m))) (pr-str m)))))
 
    ;; The accent reaches the rendered chrome as a real computed color.
-   (fn [] (p/let [c (.evaluate page "getComputedStyle(document.documentElement).getPropertyValue('--hig-color-tint').trim()")]
-            (check! "theme accent is live in the cascade" (= "#e06090" (str c)) (pr-str c))))
+    ;; The token contract still answers — but now resolved through DADS.
+   ;; getPropertyValue returns the DECLARED value, so a bridged token reads
+   ;; back as its var() reference; what proves the chain resolves is that a
+   ;; property computed FROM it has a real length.
+   (fn [] (p/let [tint (.evaluate page "getComputedStyle(document.documentElement).getPropertyValue('--hig-color-tint').trim()")
+                  key (.evaluate page "getComputedStyle(document.documentElement).getPropertyValue('--color-key-900').trim()")
+                  gap (.evaluate page "getComputedStyle(document.querySelector('.genko-toolbar')).gap")
+                  radius (.evaluate page "getComputedStyle(document.querySelector('.genko-node')).borderRadius")]
+            ;; getPropertyValue resolves var() chains, so a bridged token reads
+            ;; back as the DADS value itself — which is the proof: --hig-color-tint
+            ;; IS --color-key-900 (デジタル庁ブルー), and the grid/radius the
+            ;; bridge added resolve to real lengths rather than to nothing.
+            (check! "the --hig-* contract resolves onto DADS primitives"
+                    (and (= (str tint) (str key))
+                         (re-find #"^#[0-9a-f]{6}$" (str key))
+                         (re-find #"^\d" (str gap))
+                         (re-find #"^\d" (str radius)))
+                    (str "tint=" tint " key=" key " gap=" gap " radius=" radius))))
 
    ;; Nothing above may have logged an error along the way.
    (fn [] (p/resolved (check! "no page errors or console errors"

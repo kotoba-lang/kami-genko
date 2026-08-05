@@ -33,7 +33,7 @@
   delegation the nearest `data-act` ancestor wins on its own, so the toggle
   never reaches the row's act and the special case disappears."
   (:require [clojure.string :as str]
-            [kotoba-ui.core :as ui]
+            [jp-go-dds.core :as dds]
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
             [kotoba.editor :as ed]))
@@ -154,11 +154,11 @@
       ;; precisely what aria-live is for.
       [:span {:role "status" :aria-live "polite"
               :title (when error? (str (second status)))}
-       (ui/badge
+       (dds/chip-label
         (case status
           :saving "…" :saved "☁✓" :loading "…" :loaded "☁✓"
           (str "☁✗ " (second status)))
-        {:class (when error? "genko-status--error")})])))
+        {:color (if error? "red" "blue")})])))
 
 (defn tools-view
   "The tool palette: a segmented control over `tool-names`.
@@ -170,9 +170,16 @@
   vertical component, and the design system does not have one today (noted as
   a gap rather than worked around with app CSS)."
   [db]
-  (ui/tab-bar (mapv (fn [t] [(keyword "tool" t) (get tool-labels t t)]) tool-names)
-              (keyword "tool" (:tool db))
-              {:class "genko-tools"}))
+  (into [:div.genko-tools {:role "group" :aria-label "ツール"}]
+        (for [t tool-names]
+          (dds/button (get tool-labels t t)
+                      {;; DADS expresses "this one is current" through the
+                       ;; button's own type rather than a separate segmented
+                       ;; control: filled is the active tool, outline the rest.
+                       :type (if (= t (:tool db)) :solid-fill :outline)
+                       :size "sm"
+                       :attrs {:data-act (str "tool/" t)
+                               :aria-pressed (if (= t (:tool db)) "true" "false")}}))))
 
 (defn toolbar-view
   "Editor toolbar — document-scope controls only. `db` is the editor db; opts
@@ -186,7 +193,7 @@
    (let [tool (:tool db)
          youshi (active-youshi db)
          zoom (get-in db [:viewport :zoom] 1.0)]
-     (ui/toolbar
+     [:header.genko-toolbar
       (remove
        nil?
        [(tools-view db)
@@ -195,64 +202,73 @@
         ;; opt had to be added to shitsuke.components/select first — it used to
         ;; drop aria-label without a word, which is how a control ends up
         ;; announced as nothing while the code reads as accessible.
-        (ui/menu-select youshi-options
-                        {:act "youshi-type"
-                         :value (or (:type youshi) "none")
-                         :attrs {:aria-label "原稿用紙"}})
-        (ui/menu-select panel-preset-options
-                        {:act "panel-preset" :value ""
-                         :attrs {:aria-label "コマ割り"}})
+        (dds/select {:size "sm" :value (or (:type youshi) "none")
+                     :attrs {:data-act "youshi-type" :aria-label "原稿用紙"}}
+                    youshi-options)
+        (dds/select {:size "sm" :value ""
+                     :attrs {:data-act "panel-preset" :aria-label "コマ割り"}}
+                    panel-preset-options)
         ;; The three tool-specific menus appear only for the tool they belong
         ;; to — the toolbar stays one row instead of carrying six dead controls.
         (when (= "fukidashi" tool)
-          (ui/menu-select (mapv (fn [ft] [ft ft]) (sort g/fukidashi-types))
-                          {:act "fuki-type" :value (:fuki-type db)
-                           :attrs {:aria-label "吹き出し種別"}}))
+          (dds/select {:size "sm" :value (:fuki-type db)
+                       :attrs {:data-act "fuki-type" :aria-label "吹き出し種別"}}
+                      (mapv (fn [x] [x x]) (sort g/fukidashi-types))))
         (when (= "fukidashi" tool)
-          (ui/menu-select (mapv (fn [ft] [ft ft]) (sort g/fukidashi-tails))
-                          {:act "fuki-tail" :value (:fuki-tail db)
-                           :attrs {:aria-label "しっぽの向き"}}))
+          (dds/select {:size "sm" :value (:fuki-tail db)
+                       :attrs {:data-act "fuki-tail" :aria-label "しっぽの向き"}}
+                      (mapv (fn [x] [x x]) (sort g/fukidashi-tails))))
         (when (= "tone" tool)
-          (ui/menu-select (mapv (fn [tp] [tp tp]) (sort g/tone-patterns))
-                          {:act "tone-pattern" :value (:tone-pattern db)
-                           :attrs {:aria-label "トーンパターン"}}))
-        (ui/spacer)
-        (ui/button "⇩ export" {:act "export" :title "JSON を書き出す"})
-        (ui/button "⇧ import" {:act "import" :title "JSON を読み込む"})
-        (when sync? (ui/button "☁ save" {:act "cloud-save" :title "kotobase.net に保存"}))
-        (when sync? (ui/button "☁ load" {:act "cloud-load" :title "kotobase.net から復元"}))
+          (dds/select {:size "sm" :value (:tone-pattern db)
+                       :attrs {:data-act "tone-pattern" :aria-label "トーンパターン"}}
+                      (mapv (fn [x] [x x]) (sort g/tone-patterns))))
+        [:span.genko-spacer]
+        (dds/button "⇩ export" {:type :outline :size "sm" :attrs {:data-act "export" :title "JSON を書き出す"}})
+        (dds/button "⇧ import" {:type :outline :size "sm" :attrs {:data-act "import" :title "JSON を読み込む"}})
+        (when sync? (dds/button "☁ save" {:type :outline :size "sm" :attrs {:data-act "cloud-save" :title "kotobase.net に保存"}}))
+        (when sync? (dds/button "☁ load" {:type :outline :size "sm" :attrs {:data-act "cloud-load" :title "kotobase.net から復元"}}))
         (when sync? (sync-status (:kotoba-status db)))
-        (ui/button "↶ undo" {:act :undo :disabled (not (ed/can-undo? db))})
-        (ui/button "↷ redo" {:act :redo :disabled (not (ed/can-redo? db))})
-        (ui/button "⌂ view" {:act :reset-viewport
-                             :title "空白ドラッグ=pan、ホイール=zoom"})
-        [:span {:class "hig-caption1 genko-readout"}
+        (dds/button "↶ undo" {:type :outline :size "sm" :disabled (not (ed/can-undo? db)) :attrs {:data-act "undo"}})
+        (dds/button "↷ redo" {:type :outline :size "sm" :disabled (not (ed/can-redo? db)) :attrs {:data-act "redo"}})
+        (dds/button "⌂ view" {:type :outline :size "sm"
+                              :attrs {:data-act "reset-viewport"
+                                      :title "空白ドラッグ=pan、ホイール=zoom"}})
+        [:span.genko-readout
          (str (count (active-nodes db)) " nodes · "
-              (Math/round (double (* 100 zoom))) "%")]])
-      {:class "genko-toolbar"}))))
+              (Math/round (double (* 100 zoom))) "%")]])])))
 
 ;; ── node tree ────────────────────────────────────────────────────────────────
+;; DADS has no list component with a trailing slot, so the tree is a semantic
+;; <ul>/<li>. That is not a downgrade: a node tree IS a list, `role="listitem"`
+;; came from a div pretending to be one, and the markup is now what a screen
+;; reader wants without being told.
+
+(defn- eye-button
+  "Visibility toggle. `xs` because it sits inside a row, not beside it."
+  [act vis?]
+  (dds/button (if vis? "👁" "🚫")
+              {:type :text :size "xs"
+               :attrs {:data-act act
+                       :title (if vis? "隠す" "表示する")
+                       :aria-pressed (if vis? "true" "false")}}))
 
 (defn- node-row
   "One tree row. `:draggable` + `data-nid` are the reorder handles the host's
-  delegated drag listeners read; `aria-selected` is why `list-row` grew its
-  `:attrs` opt — a selected row has to say so to a screen reader, not only to
-  the eye."
+  delegated drag listeners read; `aria-selected` says a row is selected to a
+  screen reader, not only to the eye.
+
+  `draggable` is the string, not the boolean: it is an ENUMERATED attribute, so
+  a bare `draggable` is an invalid value and falls back to `auto` — which for a
+  list item means not draggable at all. reagent/React happens to serialise
+  `true` as `\"true\"`, but the SSR path renders the bare form, and the
+  dual-render contract means both must be right."
   [{:keys [nid nm vis]} selected?]
-  (ui/list-row
+  [:li.genko-node {:draggable "true"
+                   :data-nid nid
+                   :data-act (str "select-node/" nid)
+                   :aria-selected (if selected? "true" "false")}
    [:span {:class (when-not vis "genko-node--hidden")} nm]
-   {:act (str "select-node/" nid)
-    :trailing (ui/icon-button (if vis "👁" "🚫")
-                              {:act (str "toggle-vis/" nid)
-                               :title (if vis "隠す" "表示する")})
-    ;; The string, not the boolean: `draggable` is an ENUMERATED attribute, not
-    ;; a boolean one, so a bare `draggable` is an invalid value and falls back
-    ;; to `auto` — which for a <div> means not draggable at all. reagent/React
-    ;; happens to serialise `true` as `"true"`, but the SSR path renders the
-    ;; bare form, and the dual-render contract means both must be right.
-    :attrs {:draggable "true"
-            :data-nid nid
-            :aria-selected (if selected? "true" "false")}}))
+   (eye-button (str "toggle-vis/" nid) vis)])
 
 (defn tree-view
   "Node tree: 原稿用紙 first (it is a page-level node, not one of `:nodes`),
@@ -261,40 +277,30 @@
   (let [rows (g/all-nodes (active-nodes db))
         youshi (active-youshi db)
         selection (:selection db)]
-    (ui/list-view
-     (remove
-      nil?
-      (cons
-       (when youshi
-         (let [vis? (not (false? (:visible youshi)))]
-           (ui/list-row
-            [:span {:class (when-not vis? "genko-node--hidden")}
-             (str "genkouyoushi (" (or (:type youshi) "none") ")")]
-            {:trailing (ui/icon-button (if vis? "👁" "🚫")
-                                       {:act :toggle-youshi-vis
-                                        :title (if vis? "隠す" "表示する")})})))
-       (map (fn [row] (node-row row (contains? selection (:nid row)))) rows)))
-     {:class "genko-tree"})))
+    (into [:ul.genko-tree {:aria-label "ノード"}]
+          (remove
+           nil?
+           (cons
+            (when youshi
+              (let [vis? (not (false? (:visible youshi)))]
+                [:li.genko-node
+                 [:span {:class (when-not vis? "genko-node--hidden")}
+                  (str "genkouyoushi (" (or (:type youshi) "none") ")")]
+                 (eye-button "toggle-youshi-vis" vis?)]))
+            (map (fn [row] (node-row row (contains? selection (:nid row)))) rows))))))
 
 (defn sidebar-view
-  "The side panel: tool palette above, node tree below. `stack` is the shell's
-  vertical scaffold — the alternative was a hand-written flex column, which is
-  the layout CSS rule 4 forbids."
+  "The side panel. One child today, but it is the panel — not the tree — that
+  the frame places, and saying so keeps the frame from having to know what is
+  inside it."
   [db]
-  ;; No :gap — the stack's own default already comes from a spacing token, and
-  ;; naming one here would emit an inline style. It would be a *token-valued*
-  ;; style, so it breaks no rule, but "the chrome renders zero style attributes"
-  ;; is a sharper invariant to hold than "…only token-valued ones", and the
-  ;; test holds it.
-  (ui/stack {:class "genko-sidebar"}
-            (tree-view db)))
+  [:aside.genko-sidebar (tree-view db)])
 
 ;; ── canvas + frame ───────────────────────────────────────────────────────────
 
 (defn canvas-view
   "The drawing surface. Attribute width/height are the world-coordinate
-  contract (1000x720) that `genko-render` assumes; display size is the CSS
-  box, which `:fill` gives it."
+  contract (1000x720) that `genko-render` assumes; display size is the CSS box."
   ([] (canvas-view nil))
   ([{:keys [id width height]}]
    [:canvas {:id (or id "gl")
@@ -304,18 +310,27 @@
              :aria-label "原稿 canvas"}]))
 
 (defn editor-view
-  "The whole editor: toolbar as the shell's nav, node tree as its sidebar,
-  canvas as its content. `:fill` is what makes this an editor rather than a
-  document — the frame is bounded and the canvas takes the leftover space, so
-  this ns writes no layout CSS at all (kotoba-ui agent-guide rule 4)."
+  "The whole editor: toolbar, node tree, canvas.
+
+  The frame lives in `app-css` rather than in a shared scaffold. kotoba-ui
+  grew an `app-shell {:fill true}` for exactly this — three editors were
+  re-deriving the same four rules — but DADS's `dds-ext-*` layer is deliberately
+  small and government-site shaped (container / section / grid / stack / row /
+  card), and on this base genko is the only editor that needs a viewport-bounded
+  frame. One consumer is a rule, not a pattern; if a second arrives, it moves
+  upstream then."
   ([db] (editor-view db nil))
   ([db {:keys [canvas] :as opts}]
-   (ui/app-shell
-    {:fill true
-     :nav (toolbar-view db (select-keys opts [:sync?]))
-     :sidebar (sidebar-view db)
-     :class "genko-editor"}
-    (canvas-view canvas))))
+   ;; The empty attrs map is load-bearing, not noise. `genko-ui/editor` mounts
+   ;; this under reagent and attaches its ref with `(update 1 assoc :ref …)`,
+   ;; which needs index 1 to BE the attrs map. Without it index 1 is the
+   ;; toolbar vector and reagent dies with "Vector's key for assoc must be a
+   ;; number" — the whole editor renders nothing. Held by a test.
+   [:div.genko-editor {}
+    (toolbar-view db (select-keys opts [:sync?]))
+    [:div.genko-body
+     (sidebar-view db)
+     [:main.genko-main (canvas-view canvas)]]]))
 
 ;; ── app stylesheet ───────────────────────────────────────────────────────────
 
@@ -330,20 +345,52 @@
        (Math/round (double (* 255 b))) " / " a ")"))
 
 (def app-css
-  "The editor's own CSS — unlayered, so it wins over the library layers
-  without a single compound selector (agent-guide rule 3).
+  "The editor's own CSS.
 
-  Deliberately four rules. Layout comes from the shell, color and type from
-  tokens; what remains is genuinely app-specific: how a `<canvas>` (a replaced
-  element with intrinsic dimensions) fills its flex parent, and the pre-paint
-  fallback for the desk color the WebGL renderer owns."
+  Every value is a `--hig-*` token — the workspace's shared token contract —
+  and `jp-go-dds.tokens/bridge-css` resolves those onto DADS primitives. So
+  this stylesheet did not have to be rewritten when the base changed from
+  liquid-glass to DADS: that is the whole point of writing to the contract
+  rather than to a library.
+
+  What it contains is the editor frame and the timeline of a drawing app: a
+  viewport-bounded shell whose canvas takes the leftover space, a sidebar that
+  scrolls inside itself, and the pre-paint fallback for the desk colour the
+  WebGL renderer owns. DADS's `dds-ext-*` layer is government-site shaped and
+  has no editor frame; genko is the only editor on this base that needs one."
   (str
-   ".genko-canvas{flex:1;min-width:0;min-height:0;width:100%;"
-   "touch-action:none;cursor:crosshair;background:" (rgba-css gr/desk-color) "}\n"
-   ;; A hidden node is still listed, just de-emphasized. tertiary-label is the
-   ;; HIG token for exactly that, and it carries its own dark value.
+   ;; --- frame: exactly the viewport, panes scroll inside it -----------------
+   ".genko-editor{height:100dvh;display:flex;flex-direction:column;overflow:hidden}\n"
+   ".genko-body{flex:1;min-height:0;display:grid;grid-template-columns:260px minmax(0,1fr)}\n"
+   ".genko-sidebar{min-height:0;overflow:auto;padding:var(--hig-spacing-2);"
+   "border-right:1px solid var(--hig-color-separator);"
+   "background:var(--hig-color-secondary-system-background)}\n"
+   ".genko-main{min-width:0;min-height:0;display:flex;flex-direction:column}\n"
+   "@media(max-width:768px){"
+   ".genko-body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}"
+   ".genko-sidebar{border-right:none;border-bottom:1px solid var(--hig-color-separator)}"
+   "}\n"
+   ;; --- toolbar -------------------------------------------------------------
+   ".genko-toolbar{display:flex;align-items:center;flex-wrap:wrap;"
+   "gap:var(--hig-spacing-2);padding:var(--hig-spacing-2) var(--hig-spacing-4);"
+   "border-bottom:1px solid var(--hig-color-separator);"
+   "background:var(--hig-color-secondary-system-background)}\n"
+   ".genko-tools{display:flex;gap:var(--hig-spacing-1);flex-wrap:wrap}\n"
+   ".genko-spacer{flex:1 1 auto}\n"
+   ".genko-readout{color:var(--hig-color-secondary-label);white-space:nowrap;"
+   "font-size:var(--hig-text-caption1-font-size)}\n"
+   ;; --- node tree -----------------------------------------------------------
+   ".genko-tree{list-style:none;margin:0;padding:0}\n"
+   ".genko-node{display:flex;align-items:center;gap:var(--hig-spacing-2);"
+   "padding:var(--hig-spacing-1) var(--hig-spacing-2);"
+   "border-radius:var(--hig-radius-sm);cursor:grab}\n"
+   ".genko-node > span:first-child{flex:1;min-width:0;overflow:hidden;"
+   "text-overflow:ellipsis;white-space:nowrap}\n"
+   ;; Selection is the key colour at low opacity — the same signal DADS uses
+   ;; for a current item, not a second one invented here.
+   ".genko-node[aria-selected=\"true\"]{background:var(--hig-color-secondary-system-fill)}\n"
+   ;; A hidden node is still listed, just de-emphasized.
    ".genko-node--hidden{color:var(--hig-color-tertiary-label)}\n"
-   ".genko-status--error{color:var(--hig-palette-red)}\n"
-   ;; The readout is a measurement, not a heading — secondary label keeps it
-   ;; legible without competing with the tool tabs beside it.
-   ".genko-readout{color:var(--hig-color-secondary-label);white-space:nowrap}\n"))
+   ;; --- canvas --------------------------------------------------------------
+   ".genko-canvas{flex:1;min-width:0;min-height:0;width:100%;"
+   "touch-action:none;cursor:crosshair;background:" (rgba-css gr/desk-color) "}\n"))
