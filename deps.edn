@@ -14,8 +14,18 @@
         org.clojure/data.json {:mvn/version "2.5.0"}   ; clj: genko JSON doc の read/write
         ;; shitsuke の kotoba.editor (portable editor kernel: selection/undo/redo/nudge/align)。
         ;; KamiGenko.editor が全ドキュメント snapshot undo/redo に使う (ADR-2607020300 段階1)。zero-dep。
+        ;; pin は kotoba-ui のものと一致させてある: 一致していないと tools.deps は
+        ;; 黙って新しい方を採るだけで、この deps.edn はどの shitsuke で動いているかを
+        ;; 言わなくなる。
         io.github.kotoba-lang/shitsuke {:git/url "https://github.com/kotoba-lang/shitsuke.git"
-                                        :git/sha "d7988c24f5cb37074b6bfc1f0c2e223f4e218f84"}
+                                        :git/sha "b6a605e3d031aef93b5783d47a1a7d9d27413d30"}
+        ;; kotoba-ui — kotoba-lang default design system の単一 entry
+        ;; (skill `kotoba-uiux` / ADR-2607122200)。genko の chrome (toolbar / node
+        ;; tree / editor frame) はこれ「だけ」を require する: liquid-glass.* や
+        ;; shitsuke.hig を直接触るのは理由必須の opt-out。app-shell :fill
+        ;; (editor frame) と select :attrs (unlabeled-control 修正) を含む。
+        io.github.kotoba-lang/kotoba-ui {:git/url "https://github.com/kotoba-lang/kotoba-ui.git"
+                                         :git/sha "888259fb011fb33a9a08462f3c27df72ed4e8da4"}
         ;; canvaskit: viewport 数学の正本 (UIScrollView semantics)。genko-render の
         ;; pan/zoom/world<->screen が委譲する (ADR-2607071130。旧 freeboard 移植コピーを差し戻し)。zero-dep。
         io.github.kotoba-lang/canvaskit {:git/url "https://github.com/kotoba-lang/canvaskit.git"
