@@ -40,11 +40,9 @@
 (def dds-css (str (fs/readFileSync (str dds-root "/resources/jp_go_dds/dds.css") "utf8")))
 
 (def out-path
-  "public/genko/index.html — the /genko prefix is on disk, not stripped at the
-  edge. The app is published at itonami.cloud/genko via a Cloudflare path
-  route, and an assets worker serves from its directory root, so the document
-  and its bundle have to live under the prefix they are served at."
-  "public/genko/index.html")
+  "public/index.html — the app is published at genko.itonami.cloud, so it sits
+  at the host root."
+  "public/index.html")
 
 (defn page []
   (dds-page/->page
@@ -57,7 +55,7 @@
     :app-css (str theme/app-css theme/full-page-css)}
    [:div {:id "app"}
     (view/editor-view (view/initial-db))]
-   [:script {:src "/genko/js/genko-app.js"}]))
+   [:script {:src "/js/genko-app.js"}]))
 
 (defn -main [& args]
   (let [html (page)
@@ -73,8 +71,7 @@
           (process/exit 1))
 
       :else
-      (do (fs/mkdirSync "public/genko" #js {:recursive true})
-          (fs/writeFileSync out-path html)
+      (do (fs/writeFileSync out-path html)
           (println "wrote" out-path (count html) "bytes")))))
 
 (apply -main (drop 2 (js->clj (.-argv process))))
