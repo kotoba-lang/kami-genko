@@ -20,7 +20,7 @@
 
 ;; From the environment, not argv: `--classpath <cp>` shifts argv, and reading
 ;; a fixed index there navigated the browser to the classpath string.
-(def url (or (.. process -env -GENKO_URL) "http://localhost:8734/"))
+(def url (or (.. process -env -GENKO_URL) "http://localhost:8737/genko/"))
 
 (defonce results (atom []))
 
