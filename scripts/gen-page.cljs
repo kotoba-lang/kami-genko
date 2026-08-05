@@ -19,9 +19,25 @@
   Check: nbb scripts/gen-page.cljs --check   (exit 1 if the file is stale)"
   (:require ["node:fs" :as fs]
             ["node:process" :as process]
-            [kotoba-ui.core :as ui]
+            [jp-go-dds.page :as dds-page]
             [kami.mangaka.genko-view :as view]
             [kami.mangaka.genko-theme :as theme]))
+
+(def dds-root
+  "Where the vendored DADS CSS lives. nbb has no resource loader, so the path
+  is resolved the way every other nbb consumer here does it — env override
+  first, because a temp worktree outside the superproject (the standard shape
+  for parallel agents) defeats every relative guess. Mirrors
+  gftdcojp/itad's web/generate.cljs."
+  (or (first (filter #(and % (fs/existsSync (str % "/resources/jp_go_dds/dds.css")))
+                     [(some-> js/process .-env .-DDS_ROOT)
+                      "orgs/kotoba-lang/jp-go-digital-design-system"
+                      "../jp-go-digital-design-system"
+                      "../../kotoba-lang/jp-go-digital-design-system"]))
+      (throw (js/Error. (str "jp-go-digital-design-system の dds.css が見つからない。"
+                             "DDS_ROOT で場所を渡すこと。")))))
+
+(def dds-css (str (fs/readFileSync (str dds-root "/resources/jp_go_dds/dds.css") "utf8")))
 
 (def out-path
   "index.html, not genko.html: this page is now published (genko.gftd.ai), and
@@ -30,14 +46,14 @@
   "public/index.html")
 
 (defn page []
-  (ui/->page
+  (dds-page/->page
    {:title "原稿 genko"
     :description "manga 原稿エディタ — コマ割り・吹き出し・トーン・原稿用紙。"
     :lang "ja"
-    :theme theme/theme
-    ;; app-css and the full-page height chain, appended after the design
-    ;; system's bundle so the unlayered app rules win (agent-guide rule 3).
-    :head [:style [:hiccup/raw (str view/app-css theme/full-page-css)]]}
+    ;; The library's own bundle is passed in whole; the app's additions ride
+    ;; in :app-css, which `page` emits last.
+    :css dds-css
+    :app-css (str theme/app-css theme/full-page-css)}
    [:div {:id "app"}
     (view/editor-view (view/initial-db))]
    [:script {:src "js/genko-app.js"}]))

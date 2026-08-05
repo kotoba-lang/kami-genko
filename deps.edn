@@ -14,18 +14,18 @@
         org.clojure/data.json {:mvn/version "2.5.0"}   ; clj: genko JSON doc の read/write
         ;; shitsuke の kotoba.editor (portable editor kernel: selection/undo/redo/nudge/align)。
         ;; KamiGenko.editor が全ドキュメント snapshot undo/redo に使う (ADR-2607020300 段階1)。zero-dep。
-        ;; pin は kotoba-ui のものと一致させてある: 一致していないと tools.deps は
-        ;; 黙って新しい方を採るだけで、この deps.edn はどの shitsuke で動いているかを
-        ;; 言わなくなる。
+        ;; UI 層は DADS へ移ったが shitsuke は残る —— ここで使うのは
+        ;; `kotoba.editor`(portable editor kernel)だけで、HIG skin ではない。
         io.github.kotoba-lang/shitsuke {:git/url "https://github.com/kotoba-lang/shitsuke.git"
                                         :git/sha "b6a605e3d031aef93b5783d47a1a7d9d27413d30"}
-        ;; kotoba-ui — kotoba-lang default design system の単一 entry
-        ;; (skill `kotoba-uiux` / ADR-2607122200)。genko の chrome (toolbar / node
-        ;; tree / editor frame) はこれ「だけ」を require する: liquid-glass.* や
-        ;; shitsuke.hig を直接触るのは理由必須の opt-out。app-shell :fill
-        ;; (editor frame) と select :attrs (unlabeled-control 修正) を含む。
-        io.github.kotoba-lang/kotoba-ui {:git/url "https://github.com/kotoba-lang/kotoba-ui.git"
-                                         :git/sha "888259fb011fb33a9a08462f3c27df72ed4e8da4"}
+        ;; jp-go-digital-design-system — デジタル庁デザインシステム(DADS)の
+        ;; cljc hiccup 化。**このワークスペースの基本 design system**
+        ;; (オーナー判断 2026-08-05: 実測で DADS 依存 170 repo / kotoba-ui 12 repo)。
+        ;; `--hig-*` トークン契約は jp-go-dds.tokens/bridge-css が DADS primitive
+        ;; の上に再定義するので、契約で書かれた app CSS は無改造で追従する。
+        io.github.kotoba-lang/jp-go-digital-design-system
+        {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system.git"
+         :git/sha "cc8f4849af5def7ea535fd6c0b8a623ccca645e9"}
         ;; canvaskit: viewport 数学の正本 (UIScrollView semantics)。genko-render の
         ;; pan/zoom/world<->screen が委譲する (ADR-2607071130。旧 freeboard 移植コピーを差し戻し)。zero-dep。
         io.github.kotoba-lang/canvaskit {:git/url "https://github.com/kotoba-lang/canvaskit.git"
