@@ -17,7 +17,13 @@
                   :modules    {:kami-genko {:init-fn kami.mangaka.genko-js/install!}}}
           :app   {:target     :browser
                   :output-dir "public/js"
-                  :asset-path "/js"
+                  ;; RELATIVE, not absolute. The page is published under a path
+                  ;; prefix — itonami.cloud/kotoba-lang/kami-genko/ today, and
+                  ;; kotoba-lang.itonami.cloud/kami-genko/ once that org host
+                  ;; exists — and those two have different absolute roots. A
+                  ;; relative asset path is correct under both, and under a
+                  ;; local file server, without rebuilding.
+                  :asset-path "js"
                   :modules    {:genko-app {:init-fn kami.mangaka.genko-app/main}}}
           :kotobase-test
           {:target :node-test
