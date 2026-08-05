@@ -321,7 +321,12 @@
   upstream then."
   ([db] (editor-view db nil))
   ([db {:keys [canvas] :as opts}]
-   [:div.genko-editor
+   ;; The empty attrs map is load-bearing, not noise. `genko-ui/editor` mounts
+   ;; this under reagent and attaches its ref with `(update 1 assoc :ref …)`,
+   ;; which needs index 1 to BE the attrs map. Without it index 1 is the
+   ;; toolbar vector and reagent dies with "Vector's key for assoc must be a
+   ;; number" — the whole editor renders nothing. Held by a test.
+   [:div.genko-editor {}
     (toolbar-view db (select-keys opts [:sync?]))
     [:div.genko-body
      (sidebar-view db)

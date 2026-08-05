@@ -190,6 +190,16 @@
       (is (str/includes? out "genkouyoushi"))
       (is (str/includes? out "data-act=\"toggle-youshi-vis\"")))))
 
+(deftest hiccup-shape-the-reagent-host-depends-on-test
+  (testing "index 1 of editor-view / canvas-view is the attrs map"
+    ;; genko-ui/editor and /canvas attach their refs with
+    ;; `(update 1 assoc :ref …)`. If index 1 is a child vector instead,
+    ;; reagent throws "Vector's key for assoc must be a number" and the editor
+    ;; renders nothing — which is exactly what happened when the frame stopped
+    ;; going through a component that always emitted attrs.
+    (is (map? (nth (view/editor-view (db)) 1)))
+    (is (map? (nth (view/canvas-view) 1)))))
+
 (deftest editor-view-test
   (let [out (html (view/editor-view (db)))]
     (testing "the editor frame, not a document"
