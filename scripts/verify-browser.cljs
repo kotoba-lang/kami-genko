@@ -133,7 +133,25 @@
           page (.newPage browser)
           errors (atom [])
           _ (.on page "pageerror" (fn [e] (swap! errors conj (str e))))
-          _ (.on page "console" (fn [m] (when (= "error" (.type m)) (swap! errors conj (.text m)))))
+          ;; Cloudflare injects its own Real User Monitoring beacon at
+          ;; /cdn-cgi/rum, which 404s on zones where RUM is not enabled. It is
+          ;; the platform's request, not the app's, and a check that fails on
+          ;; every deploy is a check people learn to ignore — so it is excluded
+          ;; by name, not by loosening the check.
+          platform-noise? (fn [t] (re-find #"cdn-cgi" (str t)))
+          ;; The console message for a failed subresource does not name the URL
+          ;; in its text ("Failed to load resource: … 404 ()") — the URL is in
+          ;; its location. Filtering on the text alone let the RUM beacon
+          ;; straight through.
+          _ (.on page "console" (fn [m]
+                                  (let [loc (some-> (.location m) (aget "url"))]
+                                    (when (and (= "error" (.type m))
+                                               (not (platform-noise? (.text m)))
+                                               (not (platform-noise? loc)))
+                                      (swap! errors conj (str (.text m) " @ " loc))))))
+          _ (.on page "response" (fn [r] (when (and (>= (.status r) 400)
+                                                    (not (platform-noise? (.url r))))
+                                           (swap! errors conj (str (.status r) " " (.url r))))))
           _ (.goto page url #js {:waitUntil "networkidle"})
           _ (.waitForSelector page "canvas.genko-canvas" #js {:timeout 15000})
           ;; strictly sequential: each thunk is only called once the previous
