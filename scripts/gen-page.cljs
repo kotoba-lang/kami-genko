@@ -40,8 +40,10 @@
 (def dds-css (str (fs/readFileSync (str dds-root "/resources/jp_go_dds/dds.css") "utf8")))
 
 (def out-path
-  "public/index.html — the app is published at genko.itonami.cloud, so it sits
-  at the host root."
+  "public/index.html. Published through cloud-itonami's sites plane
+  (network-awai/cloud-itonami sites.edn, ADR-2607301300), whose generator
+  copies this directory into public/sites/{org}/{repo}/ — so the page lives
+  under a path prefix and all its references are relative."
   "public/index.html")
 
 (defn page []
@@ -55,7 +57,7 @@
     :app-css (str theme/app-css theme/full-page-css)}
    [:div {:id "app"}
     (view/editor-view (view/initial-db))]
-   [:script {:src "/js/genko-app.js"}]))
+   [:script {:src "js/genko-app.js"}]))
 
 (defn -main [& args]
   (let [html (page)

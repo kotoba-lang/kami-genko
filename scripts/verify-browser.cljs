@@ -119,14 +119,24 @@
             (check! "the eye toggle does not also re-select its row"
                     (= "true" v) (pr-str v))))
 
-   ;; :fill really bounds the frame — the page must not scroll.
-   (fn [] (p/let [m (.evaluate page "(() => { const a = document.querySelector('.genko-editor'); const r = a.getBoundingClientRect(); return {h: Math.round(r.height), vh: window.innerHeight, scrolls: document.documentElement.scrollHeight > window.innerHeight + 1}; })()")]
+   ;; The frame is bounded and the controls are above the fold.
+   ;;
+   ;; Not "the page never scrolls": that is only true where the editor IS the
+   ;; page. Published through cloud-itonami's sites plane the page also carries
+   ;; the shared header, breadcrumb and footer, so it scrolls by design and the
+   ;; editor is deliberately bounded to leave room for them. What has to hold on
+   ;; both surfaces is that the frame does not exceed the viewport and the
+   ;; toolbar is reachable without scrolling — those are the things that break.
+   (fn [] (p/let [m (.evaluate page "(() => { const a = document.querySelector('.genko-editor'); const r = a.getBoundingClientRect(); const t = document.querySelector('.genko-toolbar').getBoundingClientRect(); return {h: Math.round(r.height), vh: window.innerHeight, chrome: !!document.querySelector('.itonami-chrome'), toolbarBottom: Math.round(t.bottom), scrolls: document.documentElement.scrollHeight > window.innerHeight + 1}; })()")]
             (let [m (js->clj m :keywordize-keys true)]
-              (check! "editor frame fills the viewport and the page does not scroll"
-                      (and (= (:h m) (:vh m)) (not (:scrolls m))) (pr-str m)))))
+              (check! "frame is bounded and the toolbar is above the fold"
+                      (and (<= (:h m) (:vh m))
+                           (<= (:toolbarBottom m) (:vh m))
+                           ;; only the standalone page must not scroll
+                           (or (:chrome m) (not (:scrolls m))))
+                      (pr-str m)))))
 
-   ;; The accent reaches the rendered chrome as a real computed color.
-    ;; The token contract still answers — but now resolved through DADS.
+   ;; The token contract still answers — but now resolved through DADS.
    ;; getPropertyValue returns the DECLARED value, so a bridged token reads
    ;; back as its var() reference; what proves the chain resolves is that a
    ;; property computed FROM it has a real length.
