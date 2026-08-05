@@ -1,22 +1,19 @@
 {
-  // Static host for the standalone genko editor at genko.gftd.ai.
+  // KAMI genko at itonami.cloud/genko.
   //
-  // Assets-only: no `main`, because there is nothing for a Worker to do. The
-  // page is a build artifact (scripts/gen-page.cljs -> public/index.html) and
-  // the editor is a cljs bundle; every document lives in the browser's
-  // localStorage, or in kotobase.net when the user presses ☁ save with a key.
-  // No D1, no R2, no secrets — nothing to leak and nothing to run.
+  // A PATH route, not a host: cloud-itonami's apex worker answers
+  // `itonami.cloud/*`, and Cloudflare resolves the more specific path route
+  // first, so this takes /genko* and the cockpit keeps everything else.
   //
-  // Deploy from the repo root (assets.directory is relative to this file):
-  //   npx shadow-cljs release app
-  //   npm run page
+  // Assets-only — no `main`. The page is a build artifact and the editor is a
+  // cljs bundle; documents live in localStorage, or in kotobase.net behind the
+  // user's own key. No D1, no R2, no secrets.
+  //
+  // Deploy:
+  //   npx shadow-cljs release app && npm run page
   //   npx wrangler deploy -c deploy/wrangler.jsonc
-  "name": "genko-gftd",
+  "name": "itonami-genko",
   "compatibility_date": "2025-03-17",
-  "assets": {
-    "directory": "../public"
-  },
-  "routes": [
-    { "pattern": "genko.gftd.ai/*", "zone_name": "gftd.ai" }
-  ]
+  "assets": { "directory": "../public" },
+  "routes": [{ "pattern": "itonami.cloud/genko*", "zone_name": "itonami.cloud" }]
 }

@@ -40,10 +40,11 @@
 (def dds-css (str (fs/readFileSync (str dds-root "/resources/jp_go_dds/dds.css") "utf8")))
 
 (def out-path
-  "index.html, not genko.html: this page is now published (genko.gftd.ai), and
-  a web host wants the document its bare path resolves to. Nothing outside
-  this repo ever linked to the old name."
-  "public/index.html")
+  "public/genko/index.html — the /genko prefix is on disk, not stripped at the
+  edge. The app is published at itonami.cloud/genko via a Cloudflare path
+  route, and an assets worker serves from its directory root, so the document
+  and its bundle have to live under the prefix they are served at."
+  "public/genko/index.html")
 
 (defn page []
   (dds-page/->page
@@ -56,7 +57,7 @@
     :app-css (str theme/app-css theme/full-page-css)}
    [:div {:id "app"}
     (view/editor-view (view/initial-db))]
-   [:script {:src "js/genko-app.js"}]))
+   [:script {:src "/genko/js/genko-app.js"}]))
 
 (defn -main [& args]
   (let [html (page)
@@ -72,7 +73,8 @@
           (process/exit 1))
 
       :else
-      (do (fs/writeFileSync out-path html)
+      (do (fs/mkdirSync "public/genko" #js {:recursive true})
+          (fs/writeFileSync out-path html)
           (println "wrote" out-path (count html) "bytes")))))
 
 (apply -main (drop 2 (js->clj (.-argv process))))
