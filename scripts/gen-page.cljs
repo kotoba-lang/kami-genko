@@ -19,8 +19,6 @@
   Check: nbb scripts/gen-page.cljs --check   (exit 1 if the file is stale)"
   (:require ["node:fs" :as fs]
             ["node:process" :as process]
-            [jp-go-dds.page :as dds-page]
-            [kami.mangaka.genko-view :as view]
             [kami.mangaka.genko-theme :as theme]))
 
 (def dds-root
@@ -39,46 +37,40 @@
 
 (def dds-css (str (fs/readFileSync (str dds-root "/resources/jp_go_dds/dds.css") "utf8")))
 
-(def out-path
+(def default-out
   "public/index.html. Published through cloud-itonami's sites plane
   (network-awai/cloud-itonami sites.edn, ADR-2607301300), whose generator
   copies this directory into public/sites/{org}/{repo}/ — so the page lives
   under a path prefix and all its references are relative."
   "public/index.html")
 
-(defn page []
-  (dds-page/->page
-   {:title "原稿 genko"
-    :description "manga 原稿エディタ — コマ割り・吹き出し・トーン・原稿用紙。"
-    :lang "ja"
-    ;; The library's own bundle is passed in whole; the app's additions ride
-    ;; in :app-css, which `page` emits last.
-    :css dds-css
-    :app-css (str theme/app-css theme/full-page-css)}
-   [:div {:id "app"}
-    ;; `app-view` and not `editor-view`: the studio surface (mangaka) renders
-    ;; the same component with `:screen :library`, and having one entry point
-    ;; means the chrome cannot drift between the two pages. With the default db
-    ;; (`:screen :editor`) this IS the editor — no catalog is declared here, so
-    ;; no work list and no ☰ 作品 button.
-    (view/app-view (view/initial-db))]
-   [:script {:src "js/genko-app.js"}]))
+(defn- arg-after
+  "`--flag value` → value, else nil. Not a general option parser on purpose:
+  this script takes two options and `nbb --classpath <cp>` has already put
+  things in argv that a general parser would have to know to ignore."
+  [args flag]
+  (second (drop-while #(not= flag %) args)))
 
 (defn -main [& args]
-  (let [html (page)
+  ;; The page itself comes from `genko-theme/->page-html` — the library, shared
+  ;; with the studio surface in cloud-itonami/mangaka. Two repos generating the
+  ;; same page from two copies of the generator is exactly how the two drift.
+  (let [out (or (arg-after args "--out") default-out)
+        html (theme/->page-html {:dds-css dds-css
+                                 :catalog (arg-after args "--catalog")})
         check? (some #{"--check"} args)
-        current (when (fs/existsSync out-path) (str (fs/readFileSync out-path "utf8")))]
+        current (when (fs/existsSync out) (str (fs/readFileSync out "utf8")))]
     (cond
       (and check? (= current html))
-      (println "index.html up to date")
+      (println (str out " up to date"))
 
       check?
-      (do (println "STALE: public/index.html differs from its generator."
+      (do (println (str "STALE: " out " differs from its generator.")
                    "Run: nbb scripts/gen-page.cljs")
           (process/exit 1))
 
       :else
-      (do (fs/writeFileSync out-path html)
-          (println "wrote" out-path (count html) "bytes")))))
+      (do (fs/writeFileSync out html)
+          (println "wrote" out (count html) "bytes")))))
 
 (apply -main (drop 2 (js->clj (.-argv process))))
