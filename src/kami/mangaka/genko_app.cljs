@@ -15,10 +15,12 @@
   自動保存は引き続き localStorage(信頼性優先、
   ネットワーク往復をキー入力のたびに走らせない)。この kotobase 同期はこの
   standalone wrapper 側の持ち物で、genko-ui には入れない(host 差し込み)。"
-  (:require [reagent.dom :as rdom]
+  (:require [clojure.string :as str]
+            [reagent.dom :as rdom]
             [reagent.core :as r]
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
+            [kami.mangaka.genko-work :as gw]
             [kami.mangaka.genko-ui :as ui]
             [kotoba.editor :as ed]
             ["@noble/curves/ed25519.js" :refer [ed25519]]
@@ -38,9 +40,46 @@
 ;; genko doc は g/write-doc(cljs=JSON.stringify) / g/read-doc(cljs=parse+normalize)。
 ;; SDK/host が B2/PDS transport を後から差し込める(port は kotoba の host-injection 流儀)。
 (def store-key "genko/doc")
-(defn- local-save! [doc] (js/localStorage.setItem store-key (g/write-doc doc)))
+
+;; ── doc ごとの保存先 ──────────────────────────────────────────────────────────
+;; 作品を開くと doc が丸ごと入れ替わる。保存先が 1 つだと、2 つ目の作品を開いた
+;; 瞬間に 1 つ目で組んだコマ割りが上書きされ、しかも「開いただけ」なので消えた
+;; ことに気づく手がかりが無い。`:docId`(genko-work が `mangaka/<rkey>/genko` と
+;; 決める)ごとに鍵を分ける。
+;;
+;; 既存ユーザの原稿が入っている `genko/doc` は鍵を変えない —— 移行を要求せずに
+;; 済むし、白紙から始めた doc に安定した id は無い。
+(def ^:private last-key "genko/last")
+
+(defn- doc-store-key [doc]
+  (let [id (some-> (:docId doc) str not-empty)]
+    (if (and id (str/starts-with? id "mangaka/")) (str "genko/doc/" id) store-key)))
+
+(defn- local-save! [doc]
+  (let [k (doc-store-key doc)]
+    (js/localStorage.setItem k (g/write-doc doc))
+    (js/localStorage.setItem last-key k)))
+
 (defn- local-load []
-  (when-let [s (js/localStorage.getItem store-key)] (g/read-doc s)))
+  ;; 最後に開いていたものを優先し、無ければ従来の鍵。どちらも読めなければ nil
+  ;; (呼び手が initial-db の白紙のままにする)。
+  (let [k (or (some-> (js/localStorage.getItem last-key) not-empty) store-key)]
+    (or (some-> (js/localStorage.getItem k) g/read-doc)
+        (when (not= k store-key)
+          (some-> (js/localStorage.getItem store-key) g/read-doc)))))
+
+(defn- resume-doc
+  "`doc` と同じ `:docId` で保存済みの原稿があればそちらを返す(無ければ `doc`)。
+
+  鍵を doc ごとに分けたのは組んだものを失わないためだが、**開く側が読み戻さないと
+  その鍵は書き込み専用になる**。作品 A を組む → B を開く → A に戻る、で A の
+  コマ割りが白紙の下絵に戻り、しかも『開き直しただけ』なので消えた理由が見えない。"
+  [doc]
+  (let [k (doc-store-key doc)]
+    (or (when (not= k store-key)
+          (some-> (js/localStorage.getItem k) g/read-doc))
+        doc)))
+
 (defonce persist (atom {:save local-save! :load local-load}))
 (defn save-doc! [] (when-let [f (:save @persist)] (f (:doc @state))))
 (defn load-doc! [] (when-let [d (some-> (:load @persist) (apply []))] (dispatch! [:set-doc d])))
@@ -140,13 +179,85 @@
       (.catch (fn [err] (js/console.error "kotoba load failed:" err)
                 (swap! state assoc :kotoba-status [:error (.-message err)])))))
 
+;; ── studio: 公開作品のカタログ ────────────────────────────────────────────────
+;; **カタログの在処はページが宣言する**: `<meta name="genko-catalog" content="api">`。
+;; これが在るときだけ一覧の画面と『☰ 作品』が出る。
+;;
+;; runtime に探させない(`api/works` を投げてみて 404 なら諦める)理由: 探索は
+;; 「カタログが在るのに落ちた」と「そもそも無い」を区別できず、後者で毎回
+;; 警告を出すことになる。宣言なら、無い面では**一度も聞きに行かない**。
+;;
+;; 相対パスであることが要点。この app は `/mangaka/` の下にも
+;; `/kotoba-lang/kami-genko/` の下にも置かれるので、絶対パスにすると mount を
+;; 跨げない(shadow-cljs の `:asset-path "js"` が相対なのと同じ理由)。
+
+(defn- meta-content [nm]
+  (some-> (js/document.querySelector (str "meta[name=\"" nm "\"]"))
+          (.getAttribute "content")
+          not-empty))
+
+(defonce catalog-base (meta-content "genko-catalog"))
+
+(defn- catalog-url [& parts] (str/join "/" (cons catalog-base parts)))
+
+(defn- fetch-json [url]
+  (-> (js/fetch url #js {:credentials "omit"})
+      (.then (fn [^js res]
+               (if (.-ok res)
+                 (.json res)
+                 (js/Promise.reject (js/Error. (str "HTTP " (.-status res) " " url))))))))
+
+(defn fetch-works!
+  "カタログを取り直す。失敗は `:error` として db に残す —— 一覧を空で見せると
+  『作品が無い』と読めてしまうので、取れなかったことを画面で言う。"
+  []
+  (when catalog-base
+    (dispatch! [:set-works-status :loading])
+    (-> (fetch-json (catalog-url "works"))
+        (.then (fn [^js j]
+                 ;; 表紙も下絵も、カタログの位置を基準に解決してから db に入れる。
+                 ;; カタログが同 origin なら `with-base` は何も書き換えない。
+                 (dispatch! [:set-works (mapv #(gw/with-base % catalog-base)
+                                              (js->clj (or (.-works j) #js [])
+                                                       :keywordize-keys true))])))
+        (.catch (fn [err]
+                  (js/console.error "genko: works catalog failed:" err)
+                  (dispatch! [:set-works-status :error]))))))
+
+(defn open-work!
+  "作品を開く: カタログから 1 件取って、公開ページを下絵に敷いた原稿にする。
+  取れなければ画面は動かさない —— 白紙に切り替えてしまうと、直前まで組んでいた
+  原稿が消えたように見える。"
+  [rkey]
+  (when catalog-base
+    (-> (fetch-json (catalog-url "work" rkey))
+        (.then (fn [^js j]
+                 (let [work (gw/with-base (js->clj j :keywordize-keys true) catalog-base)]
+                   ;; 途中まで組んであるならそれを開く。投影は「まだ何も組んで
+                   ;; いないとき」の初期値であって、開くたびに戻す値ではない。
+                   (dispatch! [:set-doc (resume-doc (gw/work->doc work))])
+                   (dispatch! [:show-editor]))))
+        (.catch (fn [err]
+                  (js/console.error "genko: open work failed:" (pr-str rkey) err)
+                  (dispatch! [:set-works-status :error]))))))
+
+(defn new-doc!
+  "白紙の原稿。`:docId` を与えない = 保存先は従来の `genko/doc`。"
+  []
+  (dispatch! [:set-doc (g/new-doc "Mangaka" {:page-id (g/gen-nid) :youshi-id (g/gen-nid)})])
+  (dispatch! [:show-editor]))
+
 ;; ── adapter (genko-ui contract; ratom host + kotobase sync plugged in) ────────
 (def adapter
-  {:db* state
-   :dispatch! dispatch!
-   :sync {:save! kotoba-sync-save!
-          :load! kotoba-sync-load!
-          :title (str kotoba-at-uri " (" kotoba-endpoint ")")}})
+  (cond-> {:db* state
+           :dispatch! dispatch!
+           :sync {:save! kotoba-sync-save!
+                  :load! kotoba-sync-load!
+                  :title (str kotoba-at-uri " (" kotoba-endpoint ")")}}
+    ;; :studio が無ければ genko-ui は一覧の画面も『☰ 作品』も出さない。
+    catalog-base (assoc :studio {:open-work! open-work!
+                                 :new-doc! new-doc!
+                                 :reload-works! fetch-works!})))
 
 ;; ── 旧 API 互換の薄い便宜関数(genkoApi / 手元スクリプトが使う) ─────────────────
 (defn- active-nodes [db] (ui/active-nodes db))
@@ -170,7 +281,13 @@
     (js/window.addEventListener "keydown"
       (fn [e] (when-let [a (ui/keydown-action e)] (dispatch! a))))
     (load-doc!) ; localStorage から復元(あれば)
-    (rdom/render [ui/editor adapter] mount)
+    ;; カタログを宣言している面では作品一覧から始める。宣言が無い面(kami-genko
+    ;; 自身の公開面)は従来どおり原稿の画面のまま — `initial-db` の :screen が
+    ;; :editor で、ここで触らない。
+    (when catalog-base
+      (dispatch! [:show-library])
+      (fetch-works!))
+    (rdom/render [ui/app adapter] mount)
     (add-watch state :autosave (fn [_ _ old new] (when (not= (:doc old) (:doc new)) (save-doc!))))
     (set! (.-genkoState js/globalThis) state) ; browser 検証フック
     (set! (.-genkoApi js/globalThis)          ; verification helpers
@@ -210,6 +327,15 @@
                :screenToWorld (fn [sx sy] (clj->js (gr/screen->world (:viewport @state) [sx sy])))
                :canUndo (fn [] (boolean (ed/can-undo? @state)))
                :canRedo (fn [] (boolean (ed/can-redo? @state)))
+               ;; 画面の切り替え。`genkoState` は cljs の atom なので JS からは
+               ;; swap! を呼べない —— 検証はここを通す(既存の setViewport 等と同じ形)。
+               :screen (fn [] (name (:screen @state :editor)))
+               :showLibrary (fn [] (dispatch! [:show-library]))
+               :showEditor (fn [] (dispatch! [:show-editor]))
+               :pageCount (fn [] (g/page-count (:doc @state)))
+               :activePage (fn [] (:activePageIdx (:doc @state) 0))
+               :setPage (fn [i] (dispatch! [:set-page (str i)]))
+               :addPage (fn [] (dispatch! [:add-page]))
                :kotobaDid (fn [] kotoba-did)
                :kotobaAtUri (fn [] kotoba-at-uri)
                :kotobaGraph (fn [] (kcid/canonical-graph kotoba-did kotoba-db-name))

@@ -2670,6 +2670,7 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 @media(max-width:768px){.genko-body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.genko-sidebar{border-right:none;border-bottom:1px solid var(--hig-color-separator)}}
 .genko-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:var(--hig-spacing-2);padding:var(--hig-spacing-2) var(--hig-spacing-4);border-bottom:1px solid var(--hig-color-separator);background:var(--hig-color-secondary-system-background)}
 .genko-tools{display:flex;gap:var(--hig-spacing-1);flex-wrap:wrap}
+.genko-pages{display:flex;align-items:center;gap:var(--hig-spacing-1);flex-wrap:nowrap}
 .genko-spacer{flex:1 1 auto}
 .genko-readout{color:var(--hig-color-secondary-label);white-space:nowrap;font-size:var(--hig-text-caption1-font-size)}
 .genko-tree{list-style:none;margin:0;padding:0}
@@ -2678,12 +2679,30 @@ body { padding-bottom: env(safe-area-inset-bottom); }
 .genko-node[aria-selected="true"]{background:var(--hig-color-secondary-system-fill)}
 .genko-node--hidden{color:var(--hig-color-tertiary-label)}
 .genko-canvas{flex:1;min-width:0;min-height:0;width:100%;touch-action:none;cursor:crosshair;background:rgb(240 234 214 / 1)}
+.genko-library{height:100dvh;display:flex;flex-direction:column;overflow:hidden;background:var(--hig-color-system-background)}
+.genko-library-body{flex:1;min-height:0;overflow:auto;padding:var(--hig-spacing-4) var(--hig-spacing-content-margin)}
+.genko-library-lede{margin:0 0 var(--hig-spacing-4);max-width:60ch;color:var(--hig-color-secondary-label);font-size:var(--hig-text-subheadline-font-size)}
+.genko-works{list-style:none;margin:0;padding:0;display:grid;gap:var(--hig-spacing-4);grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+.genko-work{display:flex;flex-direction:column;gap:var(--hig-spacing-2);padding:var(--hig-spacing-3);border-radius:var(--hig-radius-md);border:1px solid var(--hig-color-separator);background:var(--hig-color-secondary-system-background)}
+.genko-work-hit{display:block;padding:0;border:0;background:none;cursor:pointer;border-radius:var(--hig-radius-sm);overflow:hidden}
+.genko-work-hit:focus-visible{outline:2px solid var(--hig-color-tint);outline-offset:2px}
+.genko-work-cover{display:block;width:100%;aspect-ratio:182/257;object-fit:cover;background:var(--hig-color-tertiary-system-fill)}
+.genko-work-nocover{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:182/257;color:var(--hig-color-tertiary-label);background:var(--hig-color-tertiary-system-fill);font-size:var(--hig-text-caption1-font-size)}
+.genko-work-body{display:flex;flex-direction:column;gap:var(--hig-spacing-1);align-items:flex-start}
+.genko-work-title{margin:0;font-size:var(--hig-text-headline-font-size)}
+.genko-work-meta{margin:0;color:var(--hig-color-secondary-label);font-size:var(--hig-text-caption1-font-size)}
+.genko-work-logline{margin:0;color:var(--hig-color-secondary-label);font-size:var(--hig-text-footnote-font-size)}
 html,body,#app{height:100%;margin:0}
 </style></head>
   <body>
     <div id="app">
       <div class="genko-editor">
-        <header class="genko-toolbar"><div class="genko-tools" role="group" aria-label="ツール">
+        <header class="genko-toolbar"><div class="genko-pages" role="group" aria-label="ページ">
+          <button data-act="set-page/-1" title="前のページ" aria-label="前のページ" class="dads-button" data-type="outline" data-size="sm" type="button" disabled>◀</button>
+          <span class="genko-readout">1 / 1</span>
+          <button data-act="set-page/1" title="次のページ" aria-label="次のページ" class="dads-button" data-type="outline" data-size="sm" type="button" disabled>▶</button>
+          <button data-act="add-page" title="ページを足す" aria-label="ページを足す" class="dads-button" data-type="outline" data-size="sm" type="button">＋</button>
+        </div><div class="genko-tools" role="group" aria-label="ツール">
           <button data-act="tool/select" aria-pressed="false" class="dads-button" data-type="outline" data-size="sm" type="button">選択</button>
           <button data-act="tool/draw" aria-pressed="true" class="dads-button" data-type="solid-fill" data-size="sm" type="button">ペン</button>
           <button data-act="tool/panel" aria-pressed="false" class="dads-button" data-type="outline" data-size="sm" type="button">コマ</button>
@@ -2711,7 +2730,7 @@ html,body,#app{height:100%;margin:0}
           <svg class="dads-select__chevron" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 17L3 8L4 7L12 15L20 7L21 8L12 17Z" fill="currentcolor"></path>
           </svg>
-        </span></span><span class="genko-spacer"></span><button data-act="export" title="JSON を書き出す" class="dads-button" data-type="outline" data-size="sm" type="button">⇩ export</button><button data-act="import" title="JSON を読み込む" class="dads-button" data-type="outline" data-size="sm" type="button">⇧ import</button><button data-act="undo" class="dads-button" data-type="outline" data-size="sm" type="button" disabled>↶ undo</button><button data-act="redo" class="dads-button" data-type="outline" data-size="sm" type="button" disabled>↷ redo</button><button data-act="reset-viewport" title="空白ドラッグ=pan、ホイール=zoom" class="dads-button" data-type="outline" data-size="sm" type="button">⌂ view</button><span class="genko-readout">0 nodes · 100%</span></header>
+        </span></span><span class="genko-spacer"></span><button data-act="export" title="JSON を書き出す" class="dads-button" data-type="outline" data-size="sm" type="button">⇩ export</button><button data-act="import" title="JSON を読み込む" class="dads-button" data-type="outline" data-size="sm" type="button">⇧ import</button><button data-act="storyboard" title="コマ・ふきだし・文字を storyboard EDN として書き出す" class="dads-button" data-type="outline" data-size="sm" type="button">⇩ storyboard</button><button data-act="undo" class="dads-button" data-type="outline" data-size="sm" type="button" disabled>↶ undo</button><button data-act="redo" class="dads-button" data-type="outline" data-size="sm" type="button" disabled>↷ redo</button><button data-act="reset-viewport" title="空白ドラッグ=pan、ホイール=zoom" class="dads-button" data-type="outline" data-size="sm" type="button">⌂ view</button><span class="genko-readout">0 nodes · 100%</span></header>
         <div class="genko-body">
           <aside class="genko-sidebar">
             <ul class="genko-tree" aria-label="ノード">

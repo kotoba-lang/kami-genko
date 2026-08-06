@@ -56,7 +56,12 @@
     :css dds-css
     :app-css (str theme/app-css theme/full-page-css)}
    [:div {:id "app"}
-    (view/editor-view (view/initial-db))]
+    ;; `app-view` and not `editor-view`: the studio surface (mangaka) renders
+    ;; the same component with `:screen :library`, and having one entry point
+    ;; means the chrome cannot drift between the two pages. With the default db
+    ;; (`:screen :editor`) this IS the editor — no catalog is declared here, so
+    ;; no work list and no ☰ 作品 button.
+    (view/app-view (view/initial-db))]
    [:script {:src "js/genko-app.js"}]))
 
 (defn -main [& args]

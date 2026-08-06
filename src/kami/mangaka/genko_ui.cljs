@@ -18,13 +18,18 @@
               {:save! (fn []) :load! (fn []) :title str}
               ; nil/省略 = 非表示 (aozora は PDS follow-up まで繋がない)。
    :prompt-fn (optional (fn [label default] -> str|nil)) ; text ツールの入力。
-              ; 省略時 js/window.prompt}
+              ; 省略時 js/window.prompt
+   :studio    (optional) ; 作品カタログを持つ host(mangaka studio)だけが渡す。
+              {:open-work! (fn [rkey]) :new-doc! (fn []) :reload-works! (fn [])}
+              ; nil/省略 = 一覧の画面も『☰ 作品』ボタンも出ない(kami-genko 自身の
+              ; 公開面。一覧が無い場所に遷移先を作らない)。}
 
   ── editor db shape (`initial-db`) ──────────────────────────────────────────
   {:doc <genko doc (kami.mangaka.genko)> :undo-stack [] :redo-stack []
    :tool str :selection #{nid} :draft nil
    :fuki-type str :fuki-tail str :tone-pattern str
-   :viewport {:x :y :zoom} :pan-from nil :kotoba-status nil}
+   :viewport {:x :y :zoom} :pan-from nil :kotoba-status nil
+   :screen :editor|:library :works [work] :works-status nil|:loading|:ok|:empty|:error}
 
   ── actions (`step` = pure (editor-db, action) -> editor-db) ─────────────────
   [:set-tool t] [:select #{nid}] [:select-node nid]
@@ -55,6 +60,9 @@
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
             [kami.mangaka.genko-view :as view]
+            ;; 書き出しの正本。storyboard に戻す変換をここで再実装しない
+            ;; (`doc->page` は panel/ふきだし/SFX/画像レイヤの読み出しを既に持つ)。
+            [kami.mangaka.genko-project :as gp]
             [kotoba.editor :as ed]
             [canvaskit.hit-test :as ckht]))
 
@@ -208,12 +216,53 @@
     :reset-viewport   (assoc db :viewport gr/default-viewport)
     :set-doc          (assoc db :doc (first args) :selection #{} :draft nil
                              :undo-stack [] :redo-stack [])
+    ;; ── ページ送り ────────────────────────────────────────────────────────
+    ;; 選択と描きかけは page に属するので、切り替えで捨てる。持ち越すと別の page
+    ;; の node が選択されたままになり、Delete が見えていない絵を消す。
+    ;; undo は積まない — どのページを見ているかは doc の内容ではない。
+    :set-page         (assoc db :doc (g/set-page-idx (:doc db) (parse-long (str (first args))))
+                             :selection #{} :draft nil)
+    :add-page         (-> (push-undo db)
+                          (assoc :selection #{} :draft nil)
+                          (update :doc g/add-page {:page-id (g/gen-nid)
+                                                   :youshi-id (g/gen-nid)}))
+    ;; ── 下絵の濃さ ────────────────────────────────────────────────────────
+    ;; active page の URL 参照画像すべてに同じ値を入れる。1 ページに下絵が 2 枚
+    ;; 在る形は genko-work では作らないが、doc は禁じていないので全部を揃える
+    ;; (toolbar の select は 1 つしか出さないので、片方だけ変わると select の値が
+    ;; どちらを指しているのか言えなくなる)。
+    :set-underlay-opacity
+    (let [o (parse-double (str (first args)))
+          nids (set (map g/nid-of (view/underlay-nodes db)))]
+      (if (or (nil? o) (empty? nids))
+        db
+        (-> (push-undo db)
+            (update-in [:doc :pages (active-idx db) :nodes]
+                       (fn [ns]
+                         (mapv (fn [n]
+                                 (if (contains? nids (g/nid-of n))
+                                   (assoc-in n [:data :opacity] o)
+                                   n))
+                               ns))))))
+    ;; ── 画面 ──────────────────────────────────────────────────────────────
+    :show-library     (assoc db :screen :library)
+    :show-editor      (assoc db :screen :editor)
+    :set-works        (let [ws (vec (first args))]
+                        (assoc db :works ws
+                               :works-status (if (seq ws) :ok :empty)))
+    :set-works-status (assoc db :works-status (first args))
     (do (js/console.warn "genko-ui/step: unknown action" (pr-str action)) db)))
 
 (def ^:private doc-ops
   #{:add-node :add-nodes :apply-preset :toggle-vis :reorder
     :set-youshi-type :toggle-youshi-vis
-    :undo :redo :delete-selected :place-text :pointer-up :set-doc})
+    :undo :redo :delete-selected :place-text :pointer-up :set-doc
+    ;; ページを足す・めくる・下絵の濃さ —— どれも doc の値(`:activePageIdx` /
+    ;; `:pages` / node の `:opacity`)なので保存する。めくるのを除くと、
+    ;; 開き直したとき 1 枚目に戻る一方で doc は 2 枚目を指しているという
+    ;; 食い違いになる。下絵が URL 参照になった今、doc は数百バイトなので
+    ;; めくるたびの書き込みは安い。
+    :add-page :set-page :set-underlay-opacity})
 
 (defn doc-action?
   "doc を変えうる(=永続化が必要な)action か。host の autosave スケジュール判定用。"
@@ -257,6 +306,36 @@
         a (js/document.createElement "a")]
     (set! (.-href a) url) (set! (.-download a) (iso-name)) (.click a) (js/URL.revokeObjectURL url)))
 
+(defn- download-text!
+  "text を `name` で保存させる。export-json! が Blob→objectURL→<a>.click していた
+  のと同じ手だが、storyboard 書き出しも同じことをするので 1 箇所にした。"
+  [text mime name]
+  (let [blob (js/Blob. #js [text] #js {:type mime})
+        url (js/URL.createObjectURL blob)
+        a (js/document.createElement "a")]
+    (set! (.-href a) url)
+    (set! (.-download a) name)
+    (.click a)
+    (js/URL.revokeObjectURL url)))
+
+(defn export-storyboard!
+  "組んだ原稿 → storyboard EDN をダウンロードさせる。
+
+  これが在るから、このエディタでの作業は眺めて終わりではなく **mangaka の
+  パイプラインの入力に戻る**: `genko-project/doc->page` が panel 矩形・ふきだしの
+  位置と本文・SFX・画像レイヤを node から読み出し、`{:page … :renders …}` を返す。
+
+  下絵(`:imageUrl` の画像)は `:renders` の画像レイヤとしては出ない —— doc の中に
+  画素が無いので `image-b64` が空になる。書き出されるのは **人が組んだもの**で、
+  それがこの書き出しの目的。EDN は pr-str で、読み手は clojure.edn/read-string。"
+  [doc]
+  (let [sb (gp/doc->page doc)
+        page (:page sb)
+        n (or (:page/number page) 1)
+        base (or (not-empty (str (:workRkey doc))) "genko")]
+    (download-text! (pr-str sb) "application/edn"
+                    (str base "-p" (if (< n 10) (str "0" n) n) "-storyboard.edn"))))
+
 (defn import-json!
   "file picker で JSON doc を選ばせ、読めたら [:set-doc doc] を発行する。"
   [dispatch!]
@@ -283,8 +362,13 @@
 ;; op 数なら十分軽い。instancing 等は現状の規模ではオーバーエンジニアリング)。
 (def ^:private vs-tex-src
   "#version 300 es\nin vec2 pos;\nin vec2 uv;\nout vec2 vUv;\nvoid main(){vUv=uv;gl_Position=vec4(pos,0.0,1.0);}")
+;; `alpha` uniform: 下絵(トレース用の参照画像)を紙より薄く敷くため。texture の
+;; alpha に掛けるだけで、blending は draw-image-op! が自分の draw の間だけ有効化して
+;; 元に戻す(単色 program 側の既存描画は blending 無しのまま — tone の塗りは色に alpha
+;; を持っているが今は不透明に描かれており、global に blending を入れるとそこの見た目が
+;; 黙って変わる)。
 (def ^:private fs-tex-src
-  "#version 300 es\nprecision mediump float;\nin vec2 vUv;\nuniform sampler2D tex;\nout vec4 o;\nvoid main(){o=texture(tex,vUv);}")
+  "#version 300 es\nprecision mediump float;\nin vec2 vUv;\nuniform sampler2D tex;\nuniform float alpha;\nout vec4 o;\nvoid main(){vec4 t=texture(tex,vUv);o=vec4(t.rgb,t.a*alpha);}")
 
 (defn- compile-shader [gl type src]
   (let [s (.createShader gl type)]
@@ -321,13 +405,14 @@
           tex-buf (.createBuffer gl)
           tex-posl (.getAttribLocation gl tex-prog "pos")
           tex-uvl (.getAttribLocation gl tex-prog "uv")
-          tex-samplerl (.getUniformLocation gl tex-prog "tex")]
+          tex-samplerl (.getUniformLocation gl tex-prog "tex")
+          tex-alphal (.getUniformLocation gl tex-prog "alpha")]
       (.bindBuffer gl (.-ARRAY_BUFFER gl) buf)
       (.enableVertexAttribArray gl posl)
       (.vertexAttribPointer gl posl 2 (.-FLOAT gl) false 0 0)
       {:gl gl :prog prog :buf buf :posl posl :coll coll
        :tex-prog tex-prog :tex-buf tex-buf :tex-posl tex-posl :tex-uvl tex-uvl
-       :tex-samplerl tex-samplerl :tex-cache (js/Map.)})))
+       :tex-samplerl tex-samplerl :tex-alphal tex-alphal :tex-cache (js/Map.)})))
 
 (defn- world->clip [W H vp [wx wy]]
   (let [[sx sy] (gr/world->screen vp [wx wy])]
@@ -381,10 +466,11 @@
         :else :line))
 
 ;; ── ai-image texture cache / async decode-and-upload ─────────────────────────
-;; base64(node の :_genImage)は node ごとに一度きり生成され、以後 mutate されない
+;; cache key は draw-list 側が組む `:image-key` をそのまま使う(genko-render.cljc)。
+;; node id 単独ではない: base64(:_genImage)は生成時に一度作られて以後 mutate されない
 ;; (app-aozora yoro-ui.state.manga-chat の ai-image-node は :manga-chat/image-success
-;; で1回作られるだけ)ので、draw-list 側の `:image-key` = node id をそのまま cache key
-;; に使える(genko-render.cljc 参照)。decode は createImageBitmap(非同期)— 完了まで
+;; で1回作られるだけ)が、下絵の `:imageUrl` は人が差し替えられるので、id だけを key に
+;; すると差し替え後も古い texture が返り続ける。decode は createImageBitmap(非同期)— 完了まで
 ;; 同じ key の再デコードを起こさないよう cache に :pending を先置きし、完了後は
 ;; `redraw!`(db を経由しない直接 render! 呼び出し — ホスト側の描画キャッシュが
 ;; 変わっただけで application state は変わっていないため、app の dispatch/db
@@ -407,19 +493,31 @@
     tex))
 
 (defn- ensure-texture!
-  "cache(js/Map)に `key` の texture が無ければ、`b64` を非同期 decode→upload して
-  cache に積み、完了後 `redraw!` を呼ぶ。既に :pending(decode 中)/texture 済みなら
-  何もしない — 同じ node を毎フレーム見ても decode は生涯 1 回だけ。"
-  [gl cache key b64 redraw!]
-  (when (and (seq b64) (not (.has cache key)))
+  "cache(js/Map)に `key` の texture が無ければ、画素を非同期に取り寄せて decode→upload
+  し cache に積み、完了後 `redraw!` を呼ぶ。既に :pending(取得中)/texture 済みなら
+  何もしない — 同じ node を毎フレーム見ても取得は生涯 1 回だけ。
+
+  画素の出どころは 2 通り(genko-render/ai-image-draws 参照): `b64` があればそれを、
+  無ければ `url` を fetch する。**fetch は失敗する** — 下絵の URL は他所の CDN を
+  指しうるので、404 も CORS も offline もありうる。失敗したら cache から key を消して
+  黙って諦める(draw-image-op! が placeholder 枠を描き続ける)。ここで例外を投げると
+  render loop ごと止まり、原稿の編集そのものが下絵の可用性に人質を取られる。"
+  [gl cache key b64 url redraw!]
+  (when (and (or (seq b64) (seq url)) (not (.has cache key)))
     (.set cache key :pending)
-    (-> (js/Promise.resolve (js/Blob. #js [(b64->bytes b64)] #js {:type "image/png"}))
+    (-> (if (seq b64)
+          (js/Promise.resolve (js/Blob. #js [(b64->bytes b64)] #js {:type "image/png"}))
+          (-> (js/fetch url #js {:mode "cors" :credentials "omit"})
+              (.then (fn [^js res]
+                       (if (.-ok res)
+                         (.blob res)
+                         (js/Promise.reject (js/Error. (str "HTTP " (.-status res)))))))))
         (.then (fn [blob] (js/createImageBitmap blob)))
         (.then (fn [bitmap]
                  (.set cache key (upload-texture! gl bitmap))
                  (redraw!)))
         (.catch (fn [err]
-                  (js/console.error "kami.mangaka.genko-ui: ai-image texture decode failed"
+                  (js/console.error "kami.mangaka.genko-ui: ai-image texture load failed"
                                      (pr-str key) err)
                   (.delete cache key))))))
 
@@ -429,10 +527,12 @@
   何も描かない(=空白のまま)のではなく、既存の単色パイプラインで dashed 相当の
   placeholder 枠(prompt node と同じ見た目)を代わりに描く — 位置がすぐ判る方が
   『画像生成中、まだ来てない』を『バグって消えた』と誤読されにくいため。"
-  [{:keys [gl tex-prog tex-buf tex-posl tex-uvl tex-samplerl tex-cache prog buf posl coll]}
-   W H vp {:keys [x1 y1 x2 y2 image-key image-b64] :as o} redraw!]
-  (ensure-texture! gl tex-cache image-key image-b64 redraw!)
-  (let [cached (.get tex-cache image-key)]
+  [{:keys [gl tex-prog tex-buf tex-posl tex-uvl tex-samplerl tex-alphal tex-cache
+           prog buf posl coll]}
+   W H vp {:keys [x1 y1 x2 y2 image-key image-b64 image-url image-alpha] :as o} redraw!]
+  (ensure-texture! gl tex-cache image-key image-b64 image-url redraw!)
+  (let [cached (.get tex-cache image-key)
+        alpha (if (number? image-alpha) image-alpha 1.0)]
     (if (and cached (not= :pending cached))
       (let [corners [[x1 y1] [x2 y1] [x2 y2] [x1 y2]]
             uvs [[0 0] [1 0] [1 1] [0 1]]
@@ -451,7 +551,17 @@
         (.activeTexture gl (.-TEXTURE0 gl))
         (.bindTexture gl (.-TEXTURE_2D gl) cached)
         (.uniform1i gl tex-samplerl 0)
-        (.drawArrays gl (.-TRIANGLE_FAN gl) 0 4))
+        (when tex-alphal (.uniform1f gl tex-alphal alpha))
+        ;; blending は**この draw の間だけ**。global に入れると単色 program 側
+        ;; (tone の塗り等、色に alpha を持ちながら今は不透明に描かれているもの)の
+        ;; 見た目が黙って変わる。薄い下絵が必要なのは image op だけなので、
+        ;; 有効化と後始末をここで閉じる。
+        (let [blend? (< alpha 1.0)]
+          (when blend?
+            (.enable gl (.-BLEND gl))
+            (.blendFunc gl (.-SRC_ALPHA gl) (.-ONE_MINUS_SRC_ALPHA gl)))
+          (.drawArrays gl (.-TRIANGLE_FAN gl) 0 4)
+          (when blend? (.disable gl (.-BLEND gl)))))
       (draw-op! gl prog buf posl coll W H vp
                 {:op :rect :mode :loop :x1 x1 :y1 y1 :x2 x2 :y2 y2
                  :color [0.5 0.5 0.5 0.9] :width 2}))))
@@ -575,14 +685,23 @@
   here; everything else is a pure editor action and goes to dispatch!.
   Keeping the two apart means a doc action can never be mistaken for a side
   effect, or the reverse."
-  [{:keys [db* dispatch! sync]}]
+  [{:keys [db* dispatch! sync studio]}]
   (fn [e]
     (when-let [act (closest-act e)]
-      (case act
-        "export"     (export-json! (:doc @db*))
-        "import"     (import-json! dispatch!)
-        "cloud-save" (when-let [f (:save! sync)] (f))
-        "cloud-load" (when-let [f (:load! sync)] (f))
+      ;; 引数付きの host act(`open-work/<rkey>`)が在るので、group で振り分ける。
+      ;; act 文字列そのままの case だと group が一致しても分岐に落ちず、
+      ;; act->action も nil を返すので**押しても何も起きない**(見た目は正常)。
+      (if-let [[group arg] (view/host-act act)]
+        (case group
+          "export"       (export-json! (:doc @db*))
+          "import"       (import-json! dispatch!)
+          "cloud-save"   (when-let [f (:save! sync)] (f))
+          "cloud-load"   (when-let [f (:load! sync)] (f))
+          "storyboard"   (export-storyboard! (:doc @db*))
+          "open-work"    (when-let [f (:open-work! studio)] (when (seq arg) (f arg)))
+          "new-doc"      (when-let [f (:new-doc! studio)] (f))
+          "reload-works" (when-let [f (:reload-works! studio)] (f))
+          nil)
         (when-let [action (view/act->action act)] (dispatch! action))))))
 
 (defn act-change-handler
@@ -693,4 +812,60 @@
       (fn [{:keys [db* sync]} & [{:keys [title]}]]
         (when-let [db @db*]
           (-> (view/editor-view db {:title title :sync? (boolean sync)})
+              (update 1 assoc :ref #(reset! root %)))))})))
+
+(defn app
+  "作品一覧 ⇄ 原稿 の 2 画面を持つ studio 本体。`editor` との違いは
+  `view/app-view`(`:screen` で分岐)を描くことと、canvas が在るときだけ
+  attach するところだけ。
+
+  canvas の attach を did-mount 1 回で済ませられないのが `editor` との実質的な
+  差: 一覧の画面には canvas が無いので、原稿の画面に切り替わった**あと**に
+  現れる。did-update で「まだ attach していない canvas が在るなら attach、
+  canvas が消えたなら detach」を見る。これを did-mount だけでやると、
+  一覧から入った人の canvas は永久に無反応になる(WebGL も pointer も
+  繋がっていない絵が出る、という一番気づきにくい壊れ方)。"
+  [adapter & [_opts]]
+  (let [root (atom nil) acts-el (atom nil) detach-acts (atom nil)
+        canvas-el (atom nil) detach-canvas (atom nil)
+        ;; 委譲リスナは root 要素に載っている。両画面とも根が `div` で同じ位置に
+        ;; 出るので React は今のところ**同じ DOM node を使い回す**(実測: 画面を
+        ;; 往復してもツールのクリックは効き続ける)から、これは観測された不具合の
+        ;; 修正ではなく、その前提が変わったときの保険。前提が崩れた場合の壊れ方は
+        ;; 『どこを押しても何も起きないが、画面は正しく描かれている』で、
+        ;; canvas と違って見た目に手がかりが無い。
+        sync-acts!
+        (fn []
+          (let [el @root]
+            (when (not= el @acts-el)
+              (when-let [d @detach-acts] (d) (reset! detach-acts nil))
+              (reset! acts-el el)
+              (when el (reset! detach-acts (attach-acts! el adapter))))))
+        sync-canvas!
+        (fn []
+          (let [el @root
+                cv (some-> el (.querySelector "canvas.genko-canvas"))]
+            (when (not= cv @canvas-el)
+              (when-let [d @detach-canvas] (d) (reset! detach-canvas nil))
+              (reset! canvas-el cv)
+              (when cv (reset! detach-canvas (attach-canvas! cv adapter))))))]
+    (r/create-class
+     {:display-name "genko-app"
+      :component-did-mount
+      (fn [_]
+        (sync-acts!)
+        (sync-canvas!))
+      :component-did-update (fn [_ _] (sync-acts!) (sync-canvas!))
+      :component-will-unmount
+      (fn [_]
+        (when-let [d @detach-acts] (d) (reset! detach-acts nil))
+        (when-let [d @detach-canvas] (d) (reset! detach-canvas nil))
+        (reset! acts-el nil)
+        (reset! canvas-el nil))
+      :reagent-render
+      (fn [{:keys [db* sync studio]} & [{:keys [title]}]]
+        (when-let [db @db*]
+          (-> (view/app-view db {:title title
+                                 :sync? (boolean sync)
+                                 :library? (boolean studio)})
               (update 1 assoc :ref #(reset! root %)))))})))

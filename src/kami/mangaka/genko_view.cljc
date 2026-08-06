@@ -51,7 +51,15 @@
    {:doc doc :undo-stack [] :redo-stack []
     :tool "draw" :selection #{} :draft nil
     :fuki-type "oval" :fuki-tail "bottom" :tone-pattern "dot"
-    :viewport gr/default-viewport :pan-from nil :kotoba-status nil}))
+    :viewport gr/default-viewport :pan-from nil :kotoba-status nil
+    ;; ── studio(作品を開く)—— 既定は従来どおり editor ────────────────────────
+    ;; `:screen` の既定を `:library` にしない。作品カタログを持たない host
+    ;; (kami-genko 自身の公開面)では空の一覧が挟まるだけで、編集を始めるのに
+    ;; クリックが 1 回増える。カタログを持つ host(mangaka studio)が起動時に
+    ;; `[:show-library]` を打つ。
+    :screen :editor
+    :works nil
+    :works-status nil}))
 
 ;; ── db accessors (pure; shared with genko-ui) ────────────────────────────────
 
@@ -70,18 +78,27 @@
   `[:select-node \"n7\"]`."
   {"tool"        :set-tool
    "select-node" :select-node
-   "toggle-vis"  :toggle-vis})
+   "toggle-vis"  :toggle-vis
+   ;; ページ送り。値は 0 起点の index を 10 進で書いた文字列。
+   "set-page"    :set-page})
 
 (def nullary-acts
   "Click acts that are their own action op and take no argument."
-  #{:undo :redo :reset-viewport :delete-selected :toggle-youshi-vis})
+  #{:undo :redo :reset-viewport :delete-selected :toggle-youshi-vis
+    :add-page :show-library :show-editor})
 
 (def host-acts
-  "Click acts that are NOT editor actions: they are effects the host owns
+  "Click act GROUPS that are NOT editor actions: they are effects the host owns
   (a download, a file picker, a network round-trip). `act->action` returns nil
   for these on purpose — `genko-ui`'s handler dispatches them itself, so a doc
-  action and a side effect can never be confused for one another."
-  #{"export" "import" "cloud-save" "cloud-load"})
+  action and a side effect can never be confused for one another.
+
+  These are matched by **group** (the part before the first `/`), not by the
+  whole act, because `open-work/<rkey>` carries an argument and is still a host
+  effect. Matching the whole string made every argument-carrying host act look
+  unknown and silently do nothing."
+  #{"export" "import" "cloud-save" "cloud-load"
+    "storyboard" "open-work" "new-doc" "reload-works"})
 
 (def change-acts
   "`change` acts (the `<select>`s) -> action op. The selected value is the
@@ -90,7 +107,8 @@
    "panel-preset" :apply-preset
    "fuki-type"    :set-fuki-type
    "fuki-tail"    :set-fuki-tail
-   "tone-pattern" :set-tone-pattern})
+   "tone-pattern" :set-tone-pattern
+   "underlay"     :set-underlay-opacity})
 
 (defn act->action
   "`data-act` string -> editor action vector, or nil when the act is not a
@@ -102,6 +120,15 @@
         (when (seq arg) [op arg])
         (let [op (keyword group)]
           (when (contains? nullary-acts op) [op]))))))
+
+(defn host-act
+  "`data-act` string -> `[group arg]` when the act is a host effect, else nil.
+  The host handler switches on `group` and gets `arg` already split, so the
+  argument-carrying host acts (`open-work/<rkey>`) need no second parser."
+  [act]
+  (when (seq act)
+    (let [[group arg] (str/split act #"/" 2)]
+      (when (contains? host-acts group) [group arg]))))
 
 (defn change-act->action
   "`data-act` string + the control's new value -> editor action vector, or nil.
@@ -140,6 +167,63 @@
   preset applies it and the menu snaps back here, so it never displays a
   stale 'current' preset that is not a property of the page."
   [["" "コマ割り…"] ["1" "1"] ["2h" "2h"] ["2v" "2v"] ["3h" "3h"] ["2x2" "2x2"]])
+
+(def underlay-options
+  "下絵の濃さ。トレースするには紙より薄くないと自分の線が見えず、薄すぎると何を
+  写しているのか分からない。0% は「消す」ではなく「今は見ない」— node は残る。"
+  [["0" "下絵 0%"] ["0.25" "25%"] ["0.45" "45%"] ["0.7" "70%"] ["1" "100%"]])
+
+(defn underlay-nodes
+  "active page の下絵 node(`ai-image` で `:imageUrl` を持つもの)。`genko-work` が
+  敷いたものだけでなく、URL 参照の画像すべてを指す — 濃さを変えられるのは
+  「画素が doc の外に在る画像」という性質であって、誰が作ったかではない。"
+  [db]
+  (filterv #(and (= "ai-image" (g/type-of %))
+                 (seq (str (:imageUrl (g/node-data %)))))
+           (active-nodes db)))
+
+(defn underlay-opacity
+  "下絵の現在の濃さ。複数あるときは先頭のもの(select は 1 つしか出さない)。"
+  [db]
+  (let [o (some-> (first (underlay-nodes db)) g/node-data :opacity)]
+    (if (number? o) (double o) 1.0)))
+
+(defn- opacity-select-value
+  "`underlay-options` のどの row を選択状態にするか。実数を文字列キーに丸めるので、
+  近いものを選ぶ(0.45 が既定だが doc は任意の値を持てる)。"
+  [opacity]
+  (->> underlay-options
+       (map first)
+       (sort-by #(Math/abs (- (double opacity) (double (parse-double %)))))
+       first))
+
+(defn page-nav-view
+  "ページ送り。`:activePageIdx` はずっと doc モデルに在ったが UI からは動かせず、
+  複数ページの原稿は開けても 1 枚目しか見られなかった。manga は 1 枚で終わらない
+  ので、これが無いと『作品を開く』が成立しない。
+
+  番号は 1 起点で見せ、act は 0 起点で渡す(モデルの index をそのまま)。"
+  [db]
+  (let [n (g/page-count (:doc db))
+        i (active-idx db)]
+    [:div.genko-pages {:role "group" :aria-label "ページ"}
+     (dds/button "◀" {:type :outline :size "sm" :disabled (<= i 0)
+                      :attrs {:data-act (str "set-page/" (dec i))
+                              :title "前のページ"
+                              :aria-label "前のページ"}})
+     (if (<= n 1)
+       [:span.genko-readout (str "1 / " (max n 1))]
+       (dds/select {:size "sm" :value (str i)
+                    :attrs {:data-act "set-page" :aria-label "ページ"}}
+                   (mapv (fn [k] [(str k) (str (inc k) " / " n)]) (range n))))
+     (dds/button "▶" {:type :outline :size "sm" :disabled (>= i (dec n))
+                      :attrs {:data-act (str "set-page/" (inc i))
+                              :title "次のページ"
+                              :aria-label "次のページ"}})
+     (dds/button "＋" {:type :outline :size "sm"
+                       :attrs {:data-act "add-page"
+                               :title "ページを足す"
+                               :aria-label "ページを足す"}})]))
 
 (defn- sync-status
   "The cloud-sync indicator. Status colors come from the HIG system palette —
@@ -189,14 +273,22 @@
   No title: the page's own `<title>` already names the document, and a label
   in here only pushed the controls onto a second row."
   ([db] (toolbar-view db nil))
-  ([db {:keys [sync?]}]
+  ([db {:keys [sync? library?]}]
    (let [tool (:tool db)
          youshi (active-youshi db)
-         zoom (get-in db [:viewport :zoom] 1.0)]
+         zoom (get-in db [:viewport :zoom] 1.0)
+         underlays (underlay-nodes db)]
      [:header.genko-toolbar
       (remove
        nil?
-       [(tools-view db)
+       [;; 作品一覧へ戻る道。カタログを持つ host のときだけ出す — 一覧が無い
+        ;; surface にこのボタンがあると、押した先が空になる。
+        (when library?
+          (dds/button "☰ 作品" {:type :outline :size "sm"
+                               :attrs {:data-act "show-library"
+                                       :title "作品一覧へ戻る"}}))
+        (page-nav-view db)
+        (tools-view db)
         ;; None of these dropdowns has a visible <label> (a toolbar has no room
         ;; for six of them), so each states its own name through :attrs. That
         ;; opt had to be added to shitsuke.components/select first — it used to
@@ -208,6 +300,11 @@
         (dds/select {:size "sm" :value ""
                      :attrs {:data-act "panel-preset" :aria-label "コマ割り"}}
                     panel-preset-options)
+        ;; 下絵の濃さ。下絵が無い page では出さない(効かない control を並べない)。
+        (when (seq underlays)
+          (dds/select {:size "sm" :value (opacity-select-value (underlay-opacity db))
+                       :attrs {:data-act "underlay" :aria-label "下絵の濃さ"}}
+                      underlay-options))
         ;; The three tool-specific menus appear only for the tool they belong
         ;; to — the toolbar stays one row instead of carrying six dead controls.
         (when (= "fukidashi" tool)
@@ -225,6 +322,12 @@
         [:span.genko-spacer]
         (dds/button "⇩ export" {:type :outline :size "sm" :attrs {:data-act "export" :title "JSON を書き出す"}})
         (dds/button "⇧ import" {:type :outline :size "sm" :attrs {:data-act "import" :title "JSON を読み込む"}})
+        ;; 組んだ原稿を storyboard EDN に戻す。これが在るから、ここでの作業は
+        ;; 眺めて終わりではなく mangaka のパイプラインの入力になる
+        ;; (genko-project/doc->page が panel 矩形・ふきだし・SFX を読み出す)。
+        (dds/button "⇩ storyboard" {:type :outline :size "sm"
+                                    :attrs {:data-act "storyboard"
+                                            :title "コマ・ふきだし・文字を storyboard EDN として書き出す"}})
         (when sync? (dds/button "☁ save" {:type :outline :size "sm" :attrs {:data-act "cloud-save" :title "kotobase.net に保存"}}))
         (when sync? (dds/button "☁ load" {:type :outline :size "sm" :attrs {:data-act "cloud-load" :title "kotobase.net から復元"}}))
         (when sync? (sync-status (:kotoba-status db)))
@@ -309,6 +412,87 @@
              :height (or height 720)
              :aria-label "原稿 canvas"}]))
 
+;; ── 作品を開く（library） ─────────────────────────────────────────────────────
+;; エディタを開いて白紙が出るのは「道具」だが、mangaka がやりたいのは「この作品の
+;; 続きを描く」。だから最初の画面は作品の一覧で、そこから 1 つ選ぶと原稿になる。
+;;
+;; カタログは host が取ってきて `[:set-works …]` で db に入れる(この ns は純)。
+;; 取れなかったときに一覧を空で見せると「作品が無い」と読めてしまうので、
+;; `:works-status` を必ず添えて **取れなかったことを言う**。
+
+(defn- work-meta-line
+  "作品カードの 2 行目: 話数・作者・ジャンル・ページ数。無い項目は出さない
+  (空の区切り記号が並ぶと、値が在るのに壊れているように読める)。"
+  [{:keys [series author genre pageCount]}]
+  (let [parts (remove str/blank?
+                      [(some-> series str)
+                       (some-> author str)
+                       (some-> genre str)
+                       (when (and (number? pageCount) (pos? pageCount))
+                         (str pageCount " ページ"))])]
+    (when (seq parts)
+      [:p.genko-work-meta (str/join " · " parts)])))
+
+(defn work-card
+  "1 作品。表紙を押しても開く(カード全体が `data-act` を持つので `closest-act` が
+  拾う)ので、ボタンは「押せる場所はここ」を示すためのもの。"
+  [{:keys [rkey title cover logline] :as work}]
+  (let [act (str "open-work/" rkey)]
+    [:li.genko-work
+     [:button.genko-work-hit {:type "button" :data-act act
+                              :aria-label (str (or (not-empty (str title)) rkey) " を原稿として開く")}
+      (if (str/blank? (str cover))
+        [:span.genko-work-nocover "表紙なし"]
+        [:img.genko-work-cover {:src (str cover) :alt "" :loading "lazy"}])]
+     [:div.genko-work-body
+      [:h3.genko-work-title (or (not-empty (str title)) rkey)]
+      (work-meta-line work)
+      (when-not (str/blank? (str logline))
+        [:p.genko-work-logline (str logline)])
+      (dds/button "原稿として開く" {:type :solid-fill :size "sm"
+                                :attrs {:data-act act}})]]))
+
+(defn works-status-view
+  "カタログの状態。`nil` は「まだ聞いていない」で、これは何も言わないのが正しい。"
+  [status]
+  (case status
+    :loading [:p.genko-readout "作品を読み込んでいます…"]
+    :empty (dds/notification-banner
+            {:type :info-1 :heading "公開済みの作品がありません"}
+            [:p "新しい原稿から始めてください。"])
+    :error (dds/notification-banner
+            {:type :warning :heading "作品の一覧を取得できませんでした"
+             :actions [(dds/button "再試行" {:type :outline :size "sm"
+                                          :attrs {:data-act "reload-works"}})]}
+            [:p "この面は作品カタログを持たない場所に置かれているか、"
+             "ネットワークが届いていません。新しい原稿と JSON の読み込みは使えます。"])
+    nil))
+
+(defn library-view
+  "作品一覧の画面。`editor-view` と同じく index 1 が attrs map であること
+  (`genko-ui` が `:ref` を差し込むため)。"
+  ([db] (library-view db nil))
+  ([db _opts]
+   (let [works (vec (:works db))]
+     [:div.genko-library {}
+      [:header.genko-toolbar
+       (dds/heading 1 "原稿スタジオ" {:size "24"})
+       [:span.genko-spacer]
+       (dds/button "新しい原稿" {:type :solid-fill :size "sm"
+                             :attrs {:data-act "new-doc"}})
+       (dds/button "⇧ import" {:type :outline :size "sm"
+                               :attrs {:data-act "import" :title "JSON を読み込む"}})
+       (when (seq (get-in db [:doc :pages]))
+         (dds/button "編集中の原稿へ" {:type :outline :size "sm"
+                                 :attrs {:data-act "show-editor"}}))]
+      [:div.genko-library-body
+       [:p.genko-library-lede
+        "作品を選ぶと、公開済みのページを下絵に敷いた原稿が開きます。"
+        "コマ割り・ふきだし・トーン・文字を上に組んで、storyboard として書き出せます。"]
+       (works-status-view (:works-status db))
+       (when (seq works)
+         (into [:ul.genko-works {:aria-label "作品"}] (map work-card works)))]])))
+
 (defn editor-view
   "The whole editor: toolbar, node tree, canvas.
 
@@ -327,10 +511,22 @@
    ;; toolbar vector and reagent dies with "Vector's key for assoc must be a
    ;; number" — the whole editor renders nothing. Held by a test.
    [:div.genko-editor {}
-    (toolbar-view db (select-keys opts [:sync?]))
+    (toolbar-view db (select-keys opts [:sync? :library?]))
     [:div.genko-body
      (sidebar-view db)
      [:main.genko-main (canvas-view canvas)]]]))
+
+(defn app-view
+  "`:screen` に従って作品一覧か原稿を出す。どちらも index 1 が attrs map なので、
+  host の `:ref` 差し込みは画面が切り替わっても同じ書き方でよい。
+
+  分岐をここに置くのは、`editor-view` を embedder(app-aozora)がそのまま使い続け
+  られるようにするため —— 一覧を持たない host に画面遷移を持ち込まない。"
+  ([db] (app-view db nil))
+  ([db opts]
+   (if (= :library (:screen db))
+     (library-view db opts)
+     (editor-view db opts))))
 
 ;; ── app stylesheet ───────────────────────────────────────────────────────────
 
@@ -344,8 +540,8 @@
        (Math/round (double (* 255 g))) " "
        (Math/round (double (* 255 b))) " / " a ")"))
 
-(def app-css
-  "The editor's own CSS.
+(def editor-css
+  "The editor screen's own CSS.
 
   Every value is a `--hig-*` token — the workspace's shared token contract —
   and `jp-go-dds.tokens/bridge-css` resolves those onto DADS primitives. So
@@ -376,6 +572,10 @@
    "border-bottom:1px solid var(--hig-color-separator);"
    "background:var(--hig-color-secondary-system-background)}\n"
    ".genko-tools{display:flex;gap:var(--hig-spacing-1);flex-wrap:wrap}\n"
+   ;; ページ送りは折り返させない。◀ と ▶ が別の行に分かれると、隣にあることで
+   ;; 意味が読める組が壊れる。
+   ".genko-pages{display:flex;align-items:center;gap:var(--hig-spacing-1);"
+   "flex-wrap:nowrap}\n"
    ".genko-spacer{flex:1 1 auto}\n"
    ".genko-readout{color:var(--hig-color-secondary-label);white-space:nowrap;"
    "font-size:var(--hig-text-caption1-font-size)}\n"
@@ -394,3 +594,60 @@
    ;; --- canvas --------------------------------------------------------------
    ".genko-canvas{flex:1;min-width:0;min-height:0;width:100%;"
    "touch-action:none;cursor:crosshair;background:" (rgba-css gr/desk-color) "}\n"))
+
+(def library-css
+  "The library screen's own CSS — the 作品一覧 you land on before there is a
+  document to edit.
+
+  It is a **separate def from `editor-css` on purpose.** Both are bounded by
+  size in the test suite, and one shared number would have grown every time a
+  screen was added until it stopped meaning anything. Bounding each screen
+  separately keeps the question the bound asks — *is a second design system
+  creeping back in?* — answerable per screen."
+  (str
+   ;; エディタと同じ viewport-bounded frame。一覧が本文ごと外側にスクロールすると
+   ;; toolbar の「新しい原稿」が画面から消え、戻る道が無くなる。
+   ".genko-library{height:100dvh;display:flex;flex-direction:column;overflow:hidden;"
+   "background:var(--hig-color-system-background)}\n"
+   ".genko-library-body{flex:1;min-height:0;overflow:auto;"
+   "padding:var(--hig-spacing-4) var(--hig-spacing-content-margin)}\n"
+   ".genko-library-lede{margin:0 0 var(--hig-spacing-4);max-width:60ch;"
+   "color:var(--hig-color-secondary-label);"
+   "font-size:var(--hig-text-subheadline-font-size)}\n"
+   ;; auto-fill + minmax: 1 列でも破綻せず、広い窓では自然に増える。列数を
+   ;; breakpoint で数えると、窓幅と作品数の組み合わせのぶんだけ規則が要る。
+   ".genko-works{list-style:none;margin:0;padding:0;display:grid;"
+   "gap:var(--hig-spacing-4);"
+   "grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}\n"
+   ".genko-work{display:flex;flex-direction:column;gap:var(--hig-spacing-2);"
+   "padding:var(--hig-spacing-3);border-radius:var(--hig-radius-md);"
+   "border:1px solid var(--hig-color-separator);"
+   "background:var(--hig-color-secondary-system-background)}\n"
+   ;; 表紙は押せる。button の既定の見た目は全部落として、中身(画像)だけを見せる。
+   ".genko-work-hit{display:block;padding:0;border:0;background:none;cursor:pointer;"
+   "border-radius:var(--hig-radius-sm);overflow:hidden}\n"
+   ".genko-work-hit:focus-visible{outline:2px solid var(--hig-color-tint);"
+   "outline-offset:2px}\n"
+   ;; aspect-ratio は仕上がり B5(182:257)。表紙が来る前から箱の高さが決まるので、
+   ;; 読み込みのたびに一覧が跳ねない。
+   ".genko-work-cover{display:block;width:100%;aspect-ratio:182/257;"
+   "object-fit:cover;background:var(--hig-color-tertiary-system-fill)}\n"
+   ".genko-work-nocover{display:flex;align-items:center;justify-content:center;"
+   "width:100%;aspect-ratio:182/257;color:var(--hig-color-tertiary-label);"
+   "background:var(--hig-color-tertiary-system-fill);"
+   "font-size:var(--hig-text-caption1-font-size)}\n"
+   ".genko-work-body{display:flex;flex-direction:column;gap:var(--hig-spacing-1);"
+   "align-items:flex-start}\n"
+   ".genko-work-title{margin:0;font-size:var(--hig-text-headline-font-size)}\n"
+   ".genko-work-meta{margin:0;color:var(--hig-color-secondary-label);"
+   "font-size:var(--hig-text-caption1-font-size)}\n"
+   ".genko-work-logline{margin:0;color:var(--hig-color-secondary-label);"
+   "font-size:var(--hig-text-footnote-font-size)}\n"))
+
+(def app-css
+  "Every screen's CSS, in one string — what a host injects.
+
+  Hosts keep consuming this name; the split into `editor-css` / `library-css`
+  is about what the test suite can bound, not about making callers assemble
+  the stylesheet themselves."
+  (str editor-css library-css))

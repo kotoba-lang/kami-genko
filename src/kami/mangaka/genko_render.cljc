@@ -200,14 +200,33 @@
     :color (hex->rgba (g/agent-color _agent)) :width prompt-placeholder-width}])
 
 (defn ai-image-draws
-  "\"ai-image\" node → :op :image 1つ(bounds + 安定 cache key + base64 payload)。
-  key は node id(:_nid) — この node は生成成功時に一度だけ作られ、以後 :_genImage は
-  変更されない(app-aozora の manga_chat.cljc に mutate 箇所なし)ので id 単独で安全な
-  cache key になる。host(WebGL2)は key ごとに一度だけ decode+upload しキャッシュする。
-  :_genImage が空(理論上は起きないが防御的に)は draw op を出さない。"
-  [{:keys [x1 y1 x2 y2 _genImage] :as d} nid]
-  (when (seq _genImage)
-    [{:op :image :x1 x1 :y1 y1 :x2 x2 :y2 y2 :image-key nid :image-b64 _genImage}]))
+  "\"ai-image\" node → :op :image 1つ(bounds + 安定 cache key + 画素の出どころ)。
+
+  画素は 2 通りで来る:
+
+  - `:_genImage` — base64。生成器が作った画像がそのまま doc の中に居る形。
+  - `:imageUrl` — URL。**既に公開されている画像を下絵として敷く**ときはこちら
+    (kami.mangaka.genko-work)。base64 で持たない理由は容量: 公開 1 ページの PNG が
+    実測 2.6MB あり、base64 にすると 3.5MB — localStorage の既定 autosave
+    (genko-app の store-key)は 2 ページで確実に溢れる。URL なら doc は数百バイトの
+    ままで、画素は CDN から来る。**doc の中に画素が無いということは、その URL が
+    死んだら下絵も消えるということ**で、これは下絵(参照)には正しく、生成物
+    (`:_genImage`)には正しくない。だから置き換えではなく 2 経路にしてある。
+
+  cache key は node id だけでは足りない: 同じ node の `:imageUrl` を差し替えたとき、
+  id 単独の key では host が古い texture を返し続ける(`:_genImage` は生涯不変という
+  前提で id を key にしていた)。出どころを key に混ぜて、差し替えが別 texture に
+  なるようにする。
+
+  `:image-alpha` は下絵の透け具合。トレースするには紙より薄くないと線が見えない。
+  どちらの画素も無い node は draw op を出さない。"
+  [{:keys [x1 y1 x2 y2 _genImage imageUrl opacity] :as d} nid]
+  (when (or (seq _genImage) (seq imageUrl))
+    [{:op :image :x1 x1 :y1 y1 :x2 x2 :y2 y2
+      :image-key (str nid "#" (if (seq imageUrl) imageUrl "b64"))
+      :image-b64 _genImage
+      :image-url imageUrl
+      :image-alpha (let [a opacity] (if (number? a) (double a) 1.0))}]))
 
 (defn node->draws
   "1 node → draw ops。panel=矩形枠, stroke=筆圧リボン, fukidashi=種別別輪郭+しっぽ,

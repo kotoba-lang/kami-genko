@@ -200,16 +200,35 @@
     (is (nil? (gr/node->draws (g/prompt-node "p2" {:prompt "no bounds"}))))))
 
 (deftest ai-image-node-draws
-  (testing "ai-image → 1 op、:op :image、bounds + 安定 key(node id)+ base64 を運ぶ"
+  (testing "ai-image(base64) → 1 op、:op :image、bounds + 安定 key + base64 を運ぶ"
     (let [n (g/wrap-node "img1" "ai-image" {:_genImage "ZmFrZQ==" :_genPrompt "a cat" :_agent "shonen"
                                             :x1 5 :y1 6 :x2 105 :y2 86})
           draws (gr/node->draws n)]
       (is (= 1 (count draws)))
       (is (= :image (:op (first draws))))
       (is (= {:x1 5 :y1 6 :x2 105 :y2 86} (select-keys (first draws) [:x1 :y1 :x2 :y2])))
-      (is (= "img1" (:image-key (first draws))) "cache key = node id(:_nid)")
-      (is (= "ZmFrZQ==" (:image-b64 (first draws))))))
-  (testing "base64 が空(理論上起きないが防御的)は draw op を出さない"
-    (is (nil? (gr/node->draws (g/wrap-node "img2" "ai-image" {:_genImage "" :x1 0 :y1 0 :x2 10 :y2 10})))))
+      (is (= "img1#b64" (:image-key (first draws)))
+          "cache key = node id + 画素の出どころ。id 単独ではない(下記の差し替えを参照)")
+      (is (= "ZmFrZQ==" (:image-b64 (first draws))))
+      (is (nil? (:image-url (first draws))))
+      (is (= 1.0 (:image-alpha (first draws))) "濃さの既定は不透明")))
+  (testing "ai-image(URL) → 画素は doc の外。URL が cache key に入り、:opacity が透け具合になる"
+    ;; 下絵(既に公開されている絵をトレースする)経路。base64 で持つと doc が MB 級に
+    ;; なり localStorage の autosave が溢れるので、URL 参照が別経路として在る。
+    (let [n (g/wrap-node "u1" "ai-image" {:imageUrl "https://example.test/p01.png" :opacity 0.45
+                                          :x1 0 :y1 0 :x2 182 :y2 257})
+          d (first (gr/node->draws n))]
+      (is (= :image (:op d)))
+      (is (= "https://example.test/p01.png" (:image-url d)))
+      (is (= "u1#https://example.test/p01.png" (:image-key d)))
+      (is (= 0.45 (:image-alpha d)))))
+  (testing "同じ node の URL を差し替えたら cache key も変わる — でないと古い texture が残る"
+    (let [k (fn [url] (:image-key (first (gr/node->draws
+                                          (g/wrap-node "u1" "ai-image"
+                                                       {:imageUrl url :x1 0 :y1 0 :x2 10 :y2 10})))))]
+      (is (not= (k "https://example.test/a.png") (k "https://example.test/b.png")))))
+  (testing "画素の出どころがどちらも無ければ draw op を出さない"
+    (is (nil? (gr/node->draws (g/wrap-node "img2" "ai-image" {:_genImage "" :x1 0 :y1 0 :x2 10 :y2 10}))))
+    (is (nil? (gr/node->draws (g/wrap-node "img2b" "ai-image" {:imageUrl "" :x1 0 :y1 0 :x2 10 :y2 10})))))
   (testing "bounds を持たない ai-image node は描かない(nil)"
     (is (nil? (gr/node->draws (g/wrap-node "img3" "ai-image" {:_genImage "ZmFrZQ=="}))))))

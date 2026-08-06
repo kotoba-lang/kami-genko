@@ -63,7 +63,11 @@
       (is (= "T" (nm "link" {:linkTitle "" :text "T"})))
       (is (= "Link" (nm "link" {:linkTitle "" :text ""})))
       (is (= "Group" (nm "group" {:groupName ""})))
-      (is (= "Panel 1" (nm "panel" {:panelName ""})))))
+      (is (= "Panel 1" (nm "panel" {:panelName ""})))
+      ;; layer に case が無かったので、名前を付けて作っている node が tree では
+      ;; 生の型名 "layer" で並んでいた —— どの絵かを答えるための一覧が答えない。
+      (is (= "下絵 p01" (nm "layer" {:layerName "下絵 p01"})))
+      (is (= "Layer" (nm "layer" {:layerName ""})))))
   (testing "all-nodes: stroke の連番は per-kind index (interleave しても strokes 配列基準)"
     (let [rows (g/all-nodes [(g/panel-node "p" {:x1 0 :y1 0 :x2 1 :y2 1})
                              (g/wrap-node "s0" "stroke" {:points []})])]
@@ -220,3 +224,36 @@
           [r1 r2] (g/page-panel-rects-normalized page)]
       (is (nil? r1))
       (is (vector? r2)))))
+
+(deftest page-ops
+  (testing "add-page: 末尾に足して、足した方を active にする"
+    (let [d0 (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
+          d1 (g/add-page d0 {:page-id "p2" :youshi-id "y2"})]
+      (is (= 2 (g/page-count d1)))
+      (is (= 1 (:activePageIdx d1)) "足した直後に見えているのは足したページ")
+      (is (= "p2" (get-in d1 [:pages 1 :id])))
+      (is (= "Page 2" (get-in d1 [:pages 1 :name])))
+      (is (empty? (get-in d1 [:pages 1 :nodes])))))
+  (testing "add-page: 原稿用紙の型は直前のページから引き継ぐ"
+    ;; manga は 1 冊のなかで用紙を混ぜない。B4 で始めた原稿の 2 枚目が既定に
+    ;; 戻ると、揃えるための操作を毎ページ人にさせることになる。
+    (let [d0 (assoc-in (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
+                       [:pages 0 :youshi] (g/youshi "y1" "a4" true))
+          d1 (g/add-page d0 {:page-id "p2" :youshi-id "y2"})]
+      (is (= "a4" (get-in d1 [:pages 1 :youshi :type])))
+      (is (= "b5" (get-in (g/add-page d0 {:page-id "p3" :youshi-id "y3" :youshi-type "b5"})
+                          [:pages 1 :youshi :type]))
+          "明示したらそちらが勝つ")))
+  (testing "set-page-idx / clamp-page-idx: UI から来た値をそのまま渡せる"
+    ;; クランプがここに無いと、範囲外の index を持つ doc が保存されうる。
+    (let [d (g/add-page (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
+                        {:page-id "p2" :youshi-id "y2"})]
+      (is (= 1 (:activePageIdx (g/set-page-idx d 1))))
+      (is (= 1 (:activePageIdx (g/set-page-idx d 99))))
+      (is (= 0 (:activePageIdx (g/set-page-idx d -3))))
+      (is (= 0 (:activePageIdx (g/set-page-idx d nil))))
+      (is (= 0 (:activePageIdx (g/set-page-idx d 1.5))) "非整数は 0 扱い")
+      (is (= 0 (g/clamp-page-idx {:pages []} 5)) "ページが無ければ 0")))
+  (testing "add-page した doc は normalize を通る"
+    (is (some? (g/normalize (g/add-page (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
+                                        {:page-id "p2" :youshi-id "y2"}))))))
