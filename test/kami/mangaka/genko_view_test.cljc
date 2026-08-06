@@ -50,14 +50,23 @@
     (is (str/includes? view/app-css "var(--hig-color-secondary-label)"))
     (is (str/includes? view/app-css "var(--hig-spacing-2)"))
     (is (str/includes? view/app-css "var(--hig-radius-sm)")))
-  (testing "the stylesheet stays small — an editor frame, not a second design system"
-    ;; It grew from 4 rules to ~15 when the base changed. That is the honest
-    ;; cost of leaving kotoba-ui: `app-shell {:fill true}` supplied the
-    ;; viewport-bounded frame, and DADS's dds-ext-* layer is government-site
+  (testing "each screen's stylesheet stays small — a frame, not a second design system"
+    ;; The editor sheet grew from 4 rules to ~15 when the base changed. That is
+    ;; the honest cost of leaving kotoba-ui: `app-shell {:fill true}` supplied
+    ;; the viewport-bounded frame, and DADS's dds-ext-* layer is government-site
     ;; shaped (container / section / grid / stack / row / card) with no editor
     ;; frame in it. The bound is here to catch a second design system creeping
     ;; back in, not to pretend the frame is free.
-    (is (< (count (str/split-lines (str/trim view/app-css))) 25))))
+    ;;
+    ;; It is bounded **per screen** rather than over `app-css`. A single number
+    ;; over the whole app has to be raised every time a screen is added, and a
+    ;; bound that is raised whenever it fails is not a bound. Adding a screen
+    ;; should mean adding a bound here, not loosening this one.
+    (is (< (count (str/split-lines (str/trim view/editor-css))) 20))
+    (is (< (count (str/split-lines (str/trim view/library-css))) 20))
+    (is (= (str/trim view/app-css)
+           (str/trim (str view/editor-css view/library-css)))
+        "app-css は各画面の連結そのもの — ここだけに規則が足されていない")))
 
 ;; ── act vocabulary ───────────────────────────────────────────────────────────
 
@@ -95,19 +104,115 @@
     (is (nil? (view/change-act->action "undo" "x")))))
 
 (deftest every-emitted-act-resolves-test
-  (testing "no control in the chrome emits an act nothing can handle"
+  (testing "no control in either screen emits an act nothing can handle"
     ;; The failure this guards is a rename on one side only: a live-looking
     ;; control that silently does nothing when clicked.
+    ;;
+    ;; Host acts are resolved with `view/host-act`, not by looking the whole
+    ;; string up in `host-acts`. Once a host act could carry an argument
+    ;; (`open-work/<rkey>`), whole-string matching declared every one of them
+    ;; unhandled — which is the same bug in the guard that the guard exists to
+    ;; find in the chrome.
     (let [d (-> (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
                 (assoc-in [:pages 0 :nodes] [(g/panel-node "n1" {:x1 0 :y1 0 :x2 1 :y2 1})]))
-          out (html (view/editor-view (db {:doc d :tool "fukidashi"}) {:sync? true}))
-          acts (map second (re-seq #"data-act=\"([^\"]+)\"" out))]
-      (is (seq acts))
-      (doseq [a acts]
-        (is (or (view/act->action a)
-                (contains? view/host-acts a)
-                (contains? view/change-acts a))
-            (str "emitted act with no handler: " a))))))
+          screens {"editor"  (html (view/editor-view (db {:doc d :tool "fukidashi"})
+                                                     {:sync? true}))
+                   "library" (html (view/library-view
+                                    (db {:screen :library
+                                         :works [{:rkey "gh-arc0-1-v11" :title "Ghost Hacker"
+                                                  :cover "img/gh-arc0-1-v11-p01"}]})))
+                   ;; The error banner carries the only retry control there is.
+                   "library/error" (html (view/library-view
+                                          (db {:screen :library :works-status :error})))}]
+      (doseq [[label out] screens]
+        (let [acts (map second (re-seq #"data-act=\"([^\"]+)\"" out))]
+          (is (seq acts) (str label " emitted no acts at all"))
+          (doseq [a acts]
+            (is (or (view/act->action a)
+                    (view/host-act a)
+                    (contains? view/change-acts a))
+                (str label " emitted an act with no handler: " a))))))))
+
+(deftest host-act-test
+  (testing "host effects are matched by group, so they can carry an argument"
+    (is (= ["open-work" "gh-arc0-1-v11"] (view/host-act "open-work/gh-arc0-1-v11")))
+    (is (= ["new-doc" nil] (view/host-act "new-doc")))
+    (is (= ["export" nil] (view/host-act "export"))))
+  (testing "an editor action is not a host effect, and vice versa"
+    ;; The two vocabularies must stay disjoint: an act that resolved as both
+    ;; would run a doc mutation and a side effect from one click.
+    (is (nil? (view/host-act "tool/draw")))
+    (is (nil? (view/host-act "undo")))
+    (is (nil? (view/act->action "open-work/gh-arc0-1-v11")))
+    (is (nil? (view/act->action "new-doc")))
+    (is (nil? (view/host-act nil)))
+    (is (nil? (view/host-act "")))))
+
+(deftest page-nav-test
+  (testing "1 ページなら送り先が無い —— 選択は出さず、前後は両方 disabled"
+    (let [out (html (view/page-nav-view (db)))]
+      (is (str/includes? out "1 / 1"))
+      (is (not (str/includes? out "aria-label=\"ページ\"><select"))
+          "1 枚しかないのに選ばせない")
+      (is (str/includes? out "disabled"))))
+  (testing "端の送り act は範囲外を指すが、モデルがクランプするので無害"
+    ;; disabled なので発火しないが、`data-act` は文字列なので host が別経路で
+    ;; 拾う可能性がある。押せないことと、押されても壊れないことは別の保証。
+    (let [d (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})]
+      (is (= 0 (:activePageIdx (g/set-page-idx d -1))))
+      (is (= 0 (:activePageIdx (g/set-page-idx d 99))))
+      (is (= 0 (:activePageIdx (g/set-page-idx d "x"))))))
+  (testing "複数ページなら前後と選択が出て、番号は 1 起点・act は 0 起点"
+    (let [d (-> (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
+                (g/add-page {:page-id "p2" :youshi-id "y2"})
+                (g/add-page {:page-id "p3" :youshi-id "y3"})
+                (g/set-page-idx 1))
+          out (html (view/page-nav-view (db {:doc d})))]
+      (is (str/includes? out "data-act=\"set-page/0\"") "◀ は 1 つ前の index")
+      (is (str/includes? out "data-act=\"set-page/2\"") "▶ は 1 つ後の index")
+      (is (str/includes? out "2 / 3") "見せる番号は 1 起点")
+      (is (str/includes? out "data-act=\"add-page\""))))
+  (testing "端では送りが disabled —— 押せるのに何も起きない、を作らない"
+    (let [d (g/add-page (g/new-doc "T" {:page-id "p1" :youshi-id "y1"})
+                        {:page-id "p2" :youshi-id "y2"})]
+      (is (str/includes? (html (view/page-nav-view (db {:doc (g/set-page-idx d 0)}))) "disabled"))
+      (is (str/includes? (html (view/page-nav-view (db {:doc (g/set-page-idx d 1)}))) "disabled")))))
+
+(deftest library-view-test
+  (testing "作品カードは表紙とタイトルを出し、開く act を持つ"
+    (let [out (html (view/library-view
+                     (db {:screen :library
+                          :works [{:rkey "gh-arc0-1-v11" :title "Ghost Hacker"
+                                   :cover "img/gh-arc0-1-v11-p01" :logline "電脳の街で"}]})))]
+      (is (str/includes? out "genko-works"))
+      (is (str/includes? out "data-act=\"open-work/gh-arc0-1-v11\""))
+      (is (str/includes? out "Ghost Hacker"))
+      (is (str/includes? out "電脳の街で"))
+      (is (str/includes? out "alt=\"\"") "表紙は装飾 —— 隣にタイトルが文字で在る")))
+  (testing "表紙が無い作品も一覧に出る —— 箱の高さは表紙の有無で変わらない"
+    (let [out (html (view/library-view (db {:screen :library :works [{:rkey "x"}]})))]
+      (is (str/includes? out "genko-work-nocover"))
+      (is (str/includes? out "data-act=\"open-work/x\""))))
+  (testing "状態を聞いていないうちは何も言わない"
+    (let [out (html (view/library-view (db {:screen :library})))]
+      (is (not (str/includes? out "読み込んでいます")))
+      (is (not (str/includes? out "取得できませんでした")))))
+  (testing "カタログが無い場所でも新しい原稿と import は使える"
+    ;; この面が作品一覧を持たないことは、原稿を作れないことを意味しない。
+    (let [out (html (view/library-view (db {:screen :library :works-status :error})))]
+      (is (str/includes? out "data-act=\"new-doc\""))
+      (is (str/includes? out "data-act=\"import\""))
+      (is (str/includes? out "data-act=\"reload-works\"")))))
+
+(deftest app-view-switches-screens-test
+  (testing ":screen で画面が決まり、既定は editor —— 一覧を持たない host に遷移を持ち込まない"
+    (is (str/includes? (html (view/app-view (db))) "genko-editor"))
+    (is (str/includes? (html (view/app-view (db {:screen :library}))) "genko-library")))
+  (testing "どちらの画面も index 1 が attrs map —— host の :ref 差し込みが同じ書き方でよい"
+    ;; これが崩れると reagent が "Vector's key for assoc must be a number" で死に、
+    ;; 画面が丸ごと出なくなる(editor-view と同じ罠)。
+    (is (map? (nth (view/app-view (db)) 1)))
+    (is (map? (nth (view/app-view (db {:screen :library})) 1)))))
 
 ;; ── rendered structure ───────────────────────────────────────────────────────
 

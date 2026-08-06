@@ -152,6 +152,42 @@
            :activePageIdx 0}
     doc (assoc :docId doc)))
 
+(defn page-count [doc] (count (:pages doc)))
+
+(defn clamp-page-idx
+  "`i` を 0..(page 数-1) に収める。page が無ければ 0。範囲外・非整数はクランプ
+  結果を返す — 呼び手が UI から受けた値をそのまま渡せるようにするため。"
+  [doc i]
+  (let [n (page-count doc)]
+    (if (zero? n)
+      0
+      (let [i (if (integer? i) i 0)]
+        (max 0 (min i (dec n)))))))
+
+(defn set-page-idx
+  "active page を `i` にする(クランプ済み、純)。"
+  [doc i]
+  (assoc doc :activePageIdx (clamp-page-idx doc i)))
+
+(defn add-page
+  "doc の末尾に空 page を1枚足し、それを active にする(純)。id は呼び手が渡す。
+
+  原稿用紙の型は**直前の page から引き継ぐ**。manga は 1 冊のなかで用紙を混ぜない
+  ので、B4 で始めた原稿の 2 枚目が既定値に戻るのは常に誤りで、揃えるための操作を
+  毎ページ人にさせることになる。明示したいときは `:youshi-type` を渡す。
+
+  ⚠ `replay-oplog` の `\"addPage\"` op は**引き継がない**(既定の b4manga で作る)。
+  揃えないこと。あれは記録済み oplog の再生で、当時の JS が実際にしたことを
+  再現するのが仕事 —— 挙動を今の正しさに合わせると、過去の oplog から復元される
+  doc が記録された doc と別物になる。"
+  [doc {:keys [page-id youshi-id youshi-type]}]
+  (let [pages (vec (:pages doc))
+        n (count pages)
+        t (or youshi-type (some-> (peek pages) :youshi :type) "b4manga")]
+    (assoc doc
+           :pages (conj pages (page page-id (str "Page " (inc n)) (youshi youshi-id t true)))
+           :activePageIdx n)))
+
 (defn wrap-node
   "node data を serialized wrapper へ。data には :type / :_nid / :_visible /
   :_parent が同期される(loadPage 相当)。"
@@ -258,6 +294,11 @@
       "text"     (str "Text: " (subs (str (:text d)) 0 (min 8 (count (str (:text d))))))
       "link"     (or (not-empty (:linkTitle d)) (not-empty (:text d)) "Link")
       "group"    (or (not-empty (:groupName d)) "Group")
+      ;; genko-project/genko-work が作る layer node は :layerName を持つのに、
+      ;; ここに case が無いため tree には生の型名 "layer" が並んでいた。名前を
+      ;; 付けて作っているものを名前で呼ばないのは、node-tree が「どの絵か」を
+      ;; 答えるための一覧だという前提を崩す。
+      "layer"    (or (not-empty (:layerName d)) "Layer")
       "tone"     "Tone"
       "fukidashi" "Fukidashi"
       "stroke"   nil        ; stroke name handled by caller (index-based)

@@ -22,6 +22,22 @@
 ;; a fixed index there navigated the browser to the classpath string.
 (def url (or (.. process -env -GENKO_URL) "http://localhost:8737/genko/"))
 
+(def channel
+  "`GENKO_BROWSER_CHANNEL=chrome` runs against the machine's installed Chrome
+  instead of playwright's own bundled build.
+
+  Needed because that bundle is not always obtainable: on this workstation
+  (2026-08-06) `playwright install chromium-headless-shell` downloads all 92 MiB
+  and then extracts only ABOUT and LICENSE.headless_shell — four attempts, no
+  binary, exit 0 each time. A check that cannot be run reports nothing, which
+  reads exactly like a check that passed, so the escape hatch is worth more than
+  the uniformity of always using the pinned build.
+
+  Default stays unset: the pinned build is the reproducible one, and Chrome
+  tracks stable on its own schedule. When this is used, say so in the run's
+  report — it is a different browser than CI would use."
+  (some-> (.. process -env -GENKO_BROWSER_CHANNEL) not-empty))
+
 (defonce results (atom []))
 
 (defn- check! [label ok? detail]
@@ -155,12 +171,63 @@
                          (re-find #"^\d" (str radius)))
                     (str "tint=" tint " key=" key " gap=" gap " radius=" radius))))
 
+   ;; SCREEN SWITCH — the delegated listeners live on the root element, and the
+   ;; root is now shared by two screens (`view/app-view` renders the library or
+   ;; the editor from `:screen`). If a switch replaced that element, every
+   ;; listener would be left on a detached node and the app would render
+   ;; perfectly while responding to nothing — the one failure mode with no
+   ;; visual tell. This page declares no catalog, so the screen is driven
+   ;; directly through the state atom rather than through a work list.
+   (fn [] (p/let [_ (.evaluate page "globalThis.genkoApi.showLibrary()")
+                  _ (settle page)
+                  lib (.evaluate page "!!document.querySelector('.genko-library')")
+                  s (.evaluate page "globalThis.genkoApi.screen()")]
+            (check! "screen switches to the library" (and lib (= "library" (str s)))
+                    (str "dom=" lib " screen=" s))))
+
+   (fn [] (p/let [_ (.evaluate page "globalThis.genkoApi.showEditor()")
+                  _ (settle page)
+                  ed (.evaluate page "!!document.querySelector('.genko-editor')")
+                  cv (.evaluate page "(() => { const c = document.querySelector('canvas.genko-canvas'); return !!(c && c.getContext('webgl2')); })()")]
+            (check! "screen switches back, canvas is live again" (and ed cv)
+                    (str "editor=" ed " canvas=" cv))))
+
+   ;; ...and the click delegation still reaches dispatch! after the round trip.
+   (fn [] (p/let [_ (.click page "[data-act='tool/tone']")
+                  _ (settle page)
+                  pressed (.getAttribute (.first (.locator page "[data-act='tool/tone']")) "aria-pressed")]
+            (check! "delegated click still works after a screen round trip"
+                    (= "true" (str pressed)) (pr-str pressed))))
+
+   ;; PAGE NAVIGATION — `:activePageIdx` was in the doc model from the start but
+   ;; nothing could move it, so a multi-page 原稿 opened and showed page 1 only.
+   (fn [] (p/let [before (.evaluate page "globalThis.genkoApi.pageCount()")
+                  _ (.evaluate page "globalThis.genkoApi.addPage()")
+                  _ (settle page)
+                  after (.evaluate page "globalThis.genkoApi.pageCount()")
+                  active (.evaluate page "globalThis.genkoApi.activePage()")]
+            (check! "adding a page lands you on the page you added"
+                    (and (= after (inc before)) (= active (dec after)))
+                    (str before " -> " after " active=" active))))
+
+   (fn [] (p/let [_ (.click page "[data-act='set-page/0']")
+                  _ (settle page)
+                  active (.evaluate page "globalThis.genkoApi.activePage()")
+                  nodes (.evaluate page "globalThis.genkoApi.nodeCount()")]
+            ;; nodeCount reads the ACTIVE page, so this also proves the canvas
+            ;; and the tree followed the switch rather than the model alone.
+            (check! "delegated click: ◀ turns back to the first page"
+                    (= 0 active) (str "active=" active " nodes=" nodes))))
+
    ;; Nothing above may have logged an error along the way.
    (fn [] (p/resolved (check! "no page errors or console errors"
                               (empty? @errors) (pr-str @errors))))])
 
 (defn -main []
-  (p/let [browser (.launch (.-chromium pw) #js {:headless true})
+  (when channel (println "browser channel:" channel "(not playwright's pinned build)"))
+  (p/let [browser (.launch (.-chromium pw)
+                           (clj->js (cond-> {:headless true}
+                                      channel (assoc :channel channel))))
           page (.newPage browser)
           errors (atom [])
           _ (.on page "pageerror" (fn [e] (swap! errors conj (str e))))
@@ -169,7 +236,12 @@
           ;; the platform's request, not the app's, and a check that fails on
           ;; every deploy is a check people learn to ignore — so it is excluded
           ;; by name, not by loosening the check.
-          platform-noise? (fn [t] (re-find #"cdn-cgi" (str t)))
+          ;; /favicon.ico is the same shape of exclusion: the BROWSER asks for it
+          ;; on every navigation whether or not the page links one, so on a bare
+          ;; static server it 404s regardless of the app. The published surface
+          ;; does serve one (itonami.cloud/favicon.ico → 200, checked 2026-08-06),
+          ;; so failing on it here would only ever report the test server.
+          platform-noise? (fn [t] (re-find #"cdn-cgi|/favicon\.ico" (str t)))
           ;; The console message for a failed subresource does not name the URL
           ;; in its text ("Failed to load resource: … 404 ()") — the URL is in
           ;; its location. Filtering on the text alone let the RUM beacon
