@@ -28,6 +28,7 @@
   no resource loader). Same shape every other consumer in the workspace uses —
   see `gftdcojp/itad`'s `web/generate.cljs`."
   (:require [jp-go-dds.core :as dds]
+            [jp-go-dds.page :as dds-page]
             [jp-go-dds.tokens :as dds-tokens]
             [kami.mangaka.genko-view :as view]))
 
@@ -65,3 +66,45 @@
         dds/ext-css "\n"
         app-css
         (when full-page? full-page-css))))
+
+(defn ->page-html
+  "The standalone host page, as a complete HTML document string.
+
+  Lives in the library rather than in `scripts/gen-page.cljs` because there is
+  more than one surface now: kami-genko's own published page (no catalog — the
+  editor, as before) and the mangaka studio Worker (a catalog — the work list
+  first). Those two must not drift, and the way to guarantee that is for both
+  to call this, not to keep two copies of a 40-line generator in two repos.
+
+  `dds-css` is the vendored DADS stylesheet, read by the caller — the same
+  arrangement as `stylesheet` above, and for the same reason (nbb has no
+  resource loader).
+
+  `catalog` is where the published works are listed, and **declaring it is what
+  turns the editor into the studio**. `genko-app` reads the meta at boot: if it
+  is absent it never asks for a work list at all, which is the right behaviour
+  on a surface that has none — probing and giving up on a 404 cannot tell
+  \"the catalog is down\" apart from \"there is no catalog\", and would warn
+  on every load of a page that is working exactly as intended.
+
+  The chrome is server-rendered from the same pure `genko-view/app-view` the
+  browser then renders over, so the first frame is the real screen rather than
+  a blank page."
+  [{:keys [dds-css catalog title description]}]
+  (dds-page/->page
+   (cond-> {:title (or title (if catalog "原稿スタジオ mangaka" "原稿 genko"))
+            :description (or description
+                             (if catalog
+                               "公開済みの manga を下絵に、コマ割り・ふきだし・トーン・文字を組む原稿スタジオ。"
+                               "manga 原稿エディタ — コマ割り・吹き出し・トーン・原稿用紙。"))
+            :lang "ja"
+            :css dds-css
+            :app-css (str app-css full-page-css)}
+     catalog (assoc :head [[:meta {:name "genko-catalog" :content catalog}]]))
+   [:div {:id "app"}
+    (view/app-view (cond-> (view/initial-db)
+                     ;; カタログが在る面は一覧から始まる。SSR がここで editor を
+                     ;; 描いてしまうと、最初のフレームだけ原稿が見えてから一覧に
+                     ;; 差し替わる —— 起動が壊れているように見える。
+                     catalog (assoc :screen :library :works-status :loading)))]
+   [:script {:src "js/genko-app.js"}]))
