@@ -59,7 +59,16 @@
     ;; `[:show-library]` を打つ。
     :screen :editor
     :works nil
-    :works-status nil}))
+    :works-status nil
+    ;; ── 生成 ──────────────────────────────────────────────────────────────
+    ;; `:gen-models` は **live のフリート走査から来る**もので、既定値を持たない
+    ;; (ADR-2607173100: concrete な model id を焼かない)。host がカタログと
+    ;; 同じように起動時に取ってきて入れる。取れなければ picker 側が
+    ;; 「これは推測です」と名乗る責任を持つ。
+    :gen-prompt ""
+    :gen-model nil
+    :gen-models nil
+    :gen-status nil}))
 
 ;; ── db accessors (pure; shared with genko-ui) ────────────────────────────────
 
@@ -98,7 +107,9 @@
   effect. Matching the whole string made every argument-carrying host act look
   unknown and silently do nothing."
   #{"export" "import" "cloud-save" "cloud-load"
-    "storyboard" "open-work" "new-doc" "reload-works"})
+    "storyboard" "open-work" "new-doc" "reload-works"
+    ;; 生成は 60〜100 秒の往復。doc action ではなく host effect。
+    "generate"})
 
 (def change-acts
   "`change` acts (the `<select>`s) -> action op. The selected value is the
@@ -108,7 +119,11 @@
    "fuki-type"    :set-fuki-type
    "fuki-tail"    :set-fuki-tail
    "tone-pattern" :set-tone-pattern
-   "underlay"     :set-underlay-opacity})
+   "underlay"     :set-underlay-opacity
+   ;; textarea も `change` 経路。入力のたびではなく確定時に db へ入れる
+   ;; ので、60〜100 秒の往復中に打ち直しても取りこぼさない。
+   "gen-prompt"   :set-gen-prompt
+   "gen-model"    :set-gen-model})
 
 (defn act->action
   "`data-act` string -> editor action vector, or nil when the act is not a
@@ -130,13 +145,23 @@
     (let [[group arg] (str/split act #"/" 2)]
       (when (contains? host-acts group) [group arg]))))
 
+(def clearable-acts
+  "`change` acts for which an EMPTY value is a real value.
+
+  For a `<select>` an empty value is the placeholder row snapping back, and
+  acting on it would re-apply the preset — which is why the default is to drop
+  it. For a free-text field it is the person deleting what they typed, and
+  dropping it means the prompt cannot be cleared: the field looks empty while
+  the db still holds the old text, and the next 生成 renders the deleted
+  prompt."
+  #{"gen-prompt"})
+
 (defn change-act->action
-  "`data-act` string + the control's new value -> editor action vector, or nil.
-  An empty value is nil, not an action: the コマ割り menu returns to its
-  placeholder row after each use and that reset must not re-apply the preset."
+  "`data-act` string + the control's new value -> editor action vector, or nil."
   [act value]
   (when-let [op (get change-acts act)]
-    (when (seq value) [op value])))
+    (when (or (seq value) (contains? clearable-acts act))
+      [op (str value)])))
 
 ;; ── toolbar ──────────────────────────────────────────────────────────────────
 
@@ -392,12 +417,116 @@
                  (eye-button "toggle-youshi-vis" vis?)]))
             (map (fn [row] (node-row row (contains? selection (:nid row)))) rows))))))
 
-(defn sidebar-view
-  "The side panel. One child today, but it is the panel — not the tree — that
-  the frame places, and saying so keeps the frame from having to know what is
-  inside it."
+;; ── 生成 ─────────────────────────────────────────────────────────────────────
+
+(defn selected-panel
+  "選択中の panel node(1 つだけ選ばれているとき)。生成した絵の行き先を決める。"
   [db]
-  [:aside.genko-sidebar (tree-view db)])
+  (let [sel (:selection db)]
+    (when (= 1 (count sel))
+      (first (filter #(and (= "panel" (g/type-of %)) (contains? sel (g/nid-of %)))
+                     (active-nodes db))))))
+
+(defn gen-target
+  "生成した絵をどこに置くか。
+
+  **コマを選んでいればそのコマの中、選んでいなければ原稿用紙の裁ち落とし枠。**
+  manga の絵はコマの中に描くものなので、既定を『ページ全面』にすると毎回置き直す
+  ことになる。逆に選択が無いのに拒否すると、1 枚絵から始める人が始められない。
+
+  `:label` は UI が行き先を名乗るためのもの —— どこに出るのか分からないまま
+  60〜100 秒待たせない。"
+  [db]
+  (if-let [p (selected-panel db)]
+    (let [{:keys [x1 y1 x2 y2]} (g/node-data p)]
+      (if (and (number? x1) (number? y1) (number? x2) (number? y2))
+        {:bounds {:x1 x1 :y1 y1 :x2 x2 :y2 y2}
+         :label (or (not-empty (str (:panelName (g/node-data p)))) "選択中のコマ")}
+        {:bounds g/youshi-trim-bounds :label "ページ全体"}))
+    {:bounds g/youshi-trim-bounds :label "ページ全体"}))
+
+(defn gen-aspect
+  "行き先の 幅/高さ。host がこれを実際の生成サイズに翻訳する(どの寸法が受理
+  されるかは生成側の知識で、エディタの知識ではない)。"
+  [db]
+  (let [{:keys [x1 y1 x2 y2]} (:bounds (gen-target db))
+        w (- x2 x1) h (- y2 y1)]
+    (when (and (pos? w) (pos? h)) (/ (double w) (double h)))))
+
+(defn gen-model-options
+  "picker の行。**model が 1 つも無いことと、推測であることは別**なので、
+  推測なら行の文言でそう言う —— 選べてしまうのに何が起きるか分からない、を作らない。"
+  [db]
+  (mapv (fn [{:keys [model-id label fallback? queue exact?]}]
+          [(str model-id)
+           (str label
+                (when fallback? "（推測）")
+                (when (and (not fallback?) (not exact?)) "（版ずれの可能性）")
+                (when (and (number? queue) (pos? queue)) (str " · 待ち " queue)))])
+        (:gen-models db)))
+
+(defn gen-status-view
+  "生成の状態。`[:error msg]` の msg は**上流が返した文字列そのまま**を出す ——
+  『生成に失敗しました』に潰すと、直せる人が原因に辿り着けない(実例: 画像
+  ゲートウェイ未設定は `no GATEWAY_URL configured` という自己申告で返る)。"
+  [status]
+  (cond
+    (= :loading status)
+    [:p.genko-readout "生成中… 60〜100 秒かかります"]
+
+    (and (vector? status) (= :error (first status)))
+    (dds/notification-banner
+     {:type :warning :heading "生成できませんでした"}
+     [:p (str (second status))])
+
+    :else nil))
+
+(defn gen-view
+  "プロンプトから絵を作る面。**host が生成先を持っているときだけ**出す ——
+  繋がっていない場所にボタンだけ在るのは、押せるのに何も起きない control と同じ。
+
+  textarea が要るので toolbar ではなく sidebar に置く。"
+  [db]
+  (let [{:keys [label]} (gen-target db)
+        busy? (= :loading (:gen-status db))
+        opts (gen-model-options db)]
+    [:section.genko-gen {:aria-label "生成"}
+     (dds/heading 2 "生成" {:size "16"})
+     [:p.genko-gen-target "行き先: " [:strong (str label)]]
+     ;; `:value` を渡さない = uncontrolled。**渡すと React が read-only にする**:
+     ;; `value` を持つ textarea に `onChange` が無いと React は毎打鍵で元の値へ
+     ;; 戻し、欄に字が入らなくなる。ここの入力は root に張った委譲リスナ
+     ;; (`data-act`)が拾うので React からは見えず、onChange を足す道は無い
+     ;; ——「pure hiccup は :on-click を持てない」という設計の裏返し。
+     ;;
+     ;; 実測(2026-08-07)でこれを踏んだ: `value` 付きだと生成ボタンが永久に
+     ;; disabled のままになる(欄には字が見えているのに db は空)。
+     (dds/textarea {:rows 3
+                    :placeholder "例: 教室、窓際、少年が振り向く、ペン画"
+                    :disabled busy?
+                    :data-act "gen-prompt"
+                    :aria-label "プロンプト"})
+     (when (seq opts)
+       (dds/select {:size "sm" :value (str (:gen-model db))
+                    :attrs {:data-act "gen-model" :aria-label "生成モデル"}}
+                   opts))
+     (dds/button (if busy? "生成中…" "生成")
+                 {:type :solid-fill :size "sm"
+                  :disabled (or busy? (str/blank? (str (:gen-prompt db))))
+                  :attrs {:data-act "generate"}})
+     (gen-status-view (:gen-status db))]))
+
+(defn sidebar-view
+  "The side panel. It is the panel — not the tree — that the frame places, and
+  saying so keeps the frame from having to know what is inside it.
+
+  `:gen?` comes from the host: only a surface that has somewhere to generate
+  shows the generation panel."
+  ([db] (sidebar-view db nil))
+  ([db {:keys [gen?]}]
+   [:aside.genko-sidebar
+    (when gen? (gen-view db))
+    (tree-view db)]))
 
 ;; ── canvas + frame ───────────────────────────────────────────────────────────
 
@@ -513,7 +642,7 @@
    [:div.genko-editor {}
     (toolbar-view db (select-keys opts [:sync? :library?]))
     [:div.genko-body
-     (sidebar-view db)
+     (sidebar-view db (select-keys opts [:gen?]))
      [:main.genko-main (canvas-view canvas)]]]))
 
 (defn app-view
@@ -593,7 +722,16 @@
    ".genko-node--hidden{color:var(--hig-color-tertiary-label)}\n"
    ;; --- canvas --------------------------------------------------------------
    ".genko-canvas{flex:1;min-width:0;min-height:0;width:100%;"
-   "touch-action:none;cursor:crosshair;background:" (rgba-css gr/desk-color) "}\n"))
+   "touch-action:none;cursor:crosshair;background:" (rgba-css gr/desk-color) "}\n"
+   ;; --- 生成 -----------------------------------------------------------------
+   ;; sidebar の中の一区画。tree との境目を線 1 本で示すだけで、独自の色は
+   ;; 持たない —— ここは「二つ目の design system」を作る場所ではない。
+   ".genko-gen{display:flex;flex-direction:column;gap:var(--hig-spacing-2);"
+   "padding-bottom:var(--hig-spacing-3);margin-bottom:var(--hig-spacing-3);"
+   "border-bottom:1px solid var(--hig-color-separator)}\n"
+   ".genko-gen textarea{width:100%}\n"
+   ".genko-gen-target{margin:0;color:var(--hig-color-secondary-label);"
+   "font-size:var(--hig-text-caption1-font-size)}\n"))
 
 (def library-css
   "The library screen's own CSS — the 作品一覧 you land on before there is a

@@ -90,7 +90,7 @@
   The chrome is server-rendered from the same pure `genko-view/app-view` the
   browser then renders over, so the first frame is the real screen rather than
   a blank page."
-  [{:keys [dds-css catalog title description]}]
+  [{:keys [dds-css catalog image-api title description]}]
   (dds-page/->page
    (cond-> {:title (or title (if catalog "原稿スタジオ mangaka" "原稿 genko"))
             :description (or description
@@ -100,7 +100,13 @@
             :lang "ja"
             :css dds-css
             :app-css (str app-css full-page-css)}
-     catalog (assoc :head [[:meta {:name "genko-catalog" :content catalog}]]))
+     (or catalog image-api)
+     (assoc :head (cond-> []
+                    catalog (conj [:meta {:name "genko-catalog" :content catalog}])
+                    ;; 生成先。宣言が無い面には生成の入口が出ない —— カタログと
+                    ;; 同じ扱いで、探索させない(繋がっていないことと落ちていることを
+                    ;; 区別できないので)。
+                    image-api (conj [:meta {:name "genko-image-api" :content image-api}]))))
    [:div {:id "app"}
     (view/app-view (cond-> (view/initial-db)
                      ;; カタログが在る面は一覧から始まる。SSR がここで editor を

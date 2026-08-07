@@ -21,6 +21,9 @@
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
             [kami.mangaka.genko-work :as gw]
+            ;; 生成側の作法(host / 認証の有無 / サイズの値域 / model map の畳み方)の
+            ;; 正本。ここで再実装しない —— それを 3 つ目の複製にしないための repo。
+            [murakumo.generation.image :as img]
             [kami.mangaka.genko-ui :as ui]
             [kotoba.editor :as ed]
             ["@noble/curves/ed25519.js" :refer [ed25519]]
@@ -56,9 +59,22 @@
     (if (and id (str/starts-with? id "mangaka/")) (str "genko/doc/" id) store-key)))
 
 (defn- local-save! [doc]
+  ;; **溢れたら正直に諦める。** 生成した絵は base64 で doc に入るので、数枚で
+  ;; localStorage の上限(5〜10MB)に届く。setItem は QuotaExceededError を投げ、
+  ;; これは autosave の watcher から呼ばれているので、捕まえないと**編集のたびに
+  ;; 例外が上がり続ける**——しかも画面には何も出ない。保存できなかったことを
+  ;; console に言って編集は続けさせる方が、静かに壊れるより良い。
   (let [k (doc-store-key doc)]
-    (js/localStorage.setItem k (g/write-doc doc))
-    (js/localStorage.setItem last-key k)))
+    (try
+      (js/localStorage.setItem k (g/write-doc doc))
+      (js/localStorage.setItem last-key k)
+      true
+      (catch :default e
+        (js/console.warn
+         (str "kami.mangaka.genko-app: 自動保存できませんでした(localStorage の容量超過か)。"
+              " 編集は続けられますが、閉じると失われます。⇩ export で書き出してください。")
+         e)
+        false))))
 
 (defn- local-load []
   ;; 最後に開いていたものを優先し、無ければ従来の鍵。どちらも読めなければ nil
@@ -241,6 +257,72 @@
                   (js/console.error "genko: open work failed:" (pr-str rkey) err)
                   (dispatch! [:set-works-status :error]))))))
 
+;; ── 生成 ────────────────────────────────────────────────────────────────────
+;; **カタログと同じく、在処はページが宣言する**:
+;; `<meta name="genko-image-api" content="https://api.murakumo.cloud/v1/images/generations">`
+;;
+;; **Worker で proxy しない。** レンダーは実測 60〜100 秒の同期 GPU 作業で、
+;; Cloudflare は非ストリーミングの Worker subrequest を 100 秒で切って HTML 524 を
+;; 返す —— proxy すると「遅い成功」がクライアント側から直せない失敗に化ける。
+;; network-awai-apex が同じ理由で画像だけ proxy から外している(その Worker は
+;; 生成トークンを持つためだけに在る)。ここはブラウザから直接叩く。
+;;
+;; 隠すべき資格情報が無いので、それで漏れるものも無い —— この gate は認証を
+;; 要求しない。速度制限が要るなら gate 側であって、ページ側の checkbox ではない
+;; (gate はページ無しで到達できる)。
+
+(defonce image-api (meta-content "genko-image-api"))
+
+(defn fetch-models!
+  "生成モデルの一覧を live のフリート走査から取る。concrete な id を焼かない
+  (ADR-2607173100)。取れなければ何もしない —— picker 側が `fallback?` を
+  『推測です』と名乗る。"
+  []
+  (when image-api
+    (-> (fetch-json img/model-map-url)
+        (.then (fn [^js j]
+                 (let [ms (img/models (img/parse-model-map (js->clj j :keywordize-keys true)))]
+                   (dispatch! [:set-gen-models ms]))))
+        (.catch (fn [err]
+                  (js/console.warn "genko: model map failed, falling back:" err)
+                  (dispatch! [:set-gen-models (img/models [])]))))))
+
+(defn generate!
+  "プロンプト → 絵 → 行き先に置く。
+
+  失敗したときに出すのは **gate が返した文字列そのまま**。潰して
+  『生成に失敗しました』にすると、直せる人が原因に辿り着けない —— 実測
+  (2026-08-07)で、画像 gate 未設定は 503 `no GATEWAY_URL configured` という
+  自己申告で返ってくる。"
+  [{:keys [prompt model aspect bounds]}]
+  (when (and image-api (not (img/blank-prompt? prompt)))
+    (dispatch! [:set-gen-status :loading])
+    (let [body (img/request {:prompt prompt :model model
+                             :size (img/size-for-aspect aspect)})]
+      (-> (js/fetch image-api
+                    #js {:method "POST"
+                         :credentials "omit"
+                         :headers #js {"content-type" "application/json"}
+                         ;; AbortSignal を付けない: 60〜100 秒は正常な所要時間で、
+                         ;; ここで締め切りを設けると遅い成功を失敗に変える。
+                         :body (js/JSON.stringify (clj->js body))})
+          (.then (fn [^js res] (.then (.text res) (fn [t] [(.-status res) t]))))
+          (.then (fn [[status text]]
+                   (let [parsed (try (js->clj (js/JSON.parse text) :keywordize-keys true)
+                                     (catch :default _ nil))]
+                     (if-let [b64 (img/b64 parsed)]
+                       (dispatch! [:add-generated {:b64 b64 :bounds bounds
+                                                   :prompt prompt :model model}])
+                       (dispatch! [:set-gen-status
+                                   [:error (or (img/error-message parsed)
+                                               ;; JSON ですらない応答(Tunnel の
+                                               ;; エラーページ等)は status と
+                                               ;; 先頭だけ見せる。
+                                               (str "HTTP " status " " (subs text 0 (min 200 (count text)))))]])))))
+          (.catch (fn [err]
+                    (js/console.error "genko: generate failed:" err)
+                    (dispatch! [:set-gen-status [:error (str err)]])))))))
+
 (defn new-doc!
   "白紙の原稿。`:docId` を与えない = 保存先は従来の `genko/doc`。"
   []
@@ -257,7 +339,10 @@
     ;; :studio が無ければ genko-ui は一覧の画面も『☰ 作品』も出さない。
     catalog-base (assoc :studio {:open-work! open-work!
                                  :new-doc! new-doc!
-                                 :reload-works! fetch-works!})))
+                                 :reload-works! fetch-works!})
+    ;; :generate が無ければ genko-ui は生成の面を出さない。宣言していない面に
+    ;; 押せないボタンを置かない。
+    image-api (assoc :generate {:generate! generate!})))
 
 ;; ── 旧 API 互換の薄い便宜関数(genkoApi / 手元スクリプトが使う) ─────────────────
 (defn- active-nodes [db] (ui/active-nodes db))
@@ -287,6 +372,7 @@
     (when catalog-base
       (dispatch! [:show-library])
       (fetch-works!))
+    (when image-api (fetch-models!))
     (rdom/render [ui/app adapter] mount)
     (add-watch state :autosave (fn [_ _ old new] (when (not= (:doc old) (:doc new)) (save-doc!))))
     (set! (.-genkoState js/globalThis) state) ; browser 検証フック
