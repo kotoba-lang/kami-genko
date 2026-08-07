@@ -55,7 +55,8 @@
   keyboard、export/import の副作用、そして view が出す `data-act` を action に
   戻す委譲リスナ (`attach-acts!`)。components 関数は view を reagent から
   deref するだけの薄い wrapper。"
-  (:require [reagent.core :as r]
+  (:require [clojure.string :as str]
+            [reagent.core :as r]
             [reagent.ratom :as ratom]
             [kami.mangaka.genko :as g]
             [kami.mangaka.genko-render :as gr]
@@ -244,6 +245,32 @@
                                    (assoc-in n [:data :opacity] o)
                                    n))
                                ns))))))
+    ;; ── 生成 ──────────────────────────────────────────────────────────────
+    ;; プロンプトとモデルは doc ではなく編集セッションの状態なので undo に積まない
+    ;; ——「打ち直した」を元に戻す対象にすると、undo が何を戻すのか予測できなくなる。
+    :set-gen-prompt   (assoc db :gen-prompt (str (first args)))
+    :set-gen-model    (assoc db :gen-model (str (first args)))
+    :set-gen-models   (let [ms (vec (first args))]
+                        (cond-> (assoc db :gen-models ms)
+                          ;; 既定の選択は live の先頭。焼いた id ではない。
+                          (and (seq ms) (str/blank? (str (:gen-model db))))
+                          (assoc :gen-model (str (:model-id (first ms))))))
+    :set-gen-status   (assoc db :gen-status (first args))
+    ;; 生成できた絵は **base64 のまま doc に入れる**。下絵(URL 参照)と違い、
+    ;; これは生成物 —— 誰かの URL が死んだら消える、が正しくない側。
+    :add-generated    (let [{:keys [b64 bounds prompt model]} (first args)]
+                        (if-not (seq b64)
+                          db
+                          (-> (push-undo db)
+                              (assoc :gen-status nil)
+                              (update-in [:doc :pages (active-idx db) :nodes]
+                                         (fnil conj [])
+                                         (g/wrap-node (g/gen-nid) "ai-image"
+                                                      (merge bounds
+                                                             {:_genImage b64
+                                                              :_genPrompt (str prompt)
+                                                              :_agent (str model)
+                                                              :mime "image/png"}))))))
     ;; ── 画面 ──────────────────────────────────────────────────────────────
     :show-library     (assoc db :screen :library)
     :show-editor      (assoc db :screen :editor)
@@ -262,7 +289,10 @@
     ;; 開き直したとき 1 枚目に戻る一方で doc は 2 枚目を指しているという
     ;; 食い違いになる。下絵が URL 参照になった今、doc は数百バイトなので
     ;; めくるたびの書き込みは安い。
-    :add-page :set-page :set-underlay-opacity})
+    :add-page :set-page :set-underlay-opacity
+    ;; 生成した絵は doc の中身(base64)なので保存する。プロンプトやモデルの選択は
+    ;; doc ではないので入れない —— 打鍵のたびに doc を書き出すことになる。
+    :add-generated})
 
 (defn doc-action?
   "doc を変えうる(=永続化が必要な)action か。host の autosave スケジュール判定用。"
@@ -685,7 +715,7 @@
   here; everything else is a pure editor action and goes to dispatch!.
   Keeping the two apart means a doc action can never be mistaken for a side
   effect, or the reverse."
-  [{:keys [db* dispatch! sync studio]}]
+  [{:keys [db* dispatch! sync studio generate]}]
   (fn [e]
     (when-let [act (closest-act e)]
       ;; 引数付きの host act(`open-work/<rkey>`)が在るので、group で振り分ける。
@@ -701,6 +731,15 @@
           "open-work"    (when-let [f (:open-work! studio)] (when (seq arg) (f arg)))
           "new-doc"      (when-let [f (:new-doc! studio)] (f))
           "reload-works" (when-let [f (:reload-works! studio)] (f))
+          ;; 生成は 60〜100 秒の同期往復。db の値(プロンプト・モデル・行き先)を
+          ;; ここで束ねて host に渡す —— host は murakumo の作法を知っていれば
+          ;; よく、エディタの db 形は知らなくてよい。
+          "generate"     (when-let [f (:generate! generate)]
+                           (let [db @db*]
+                             (f {:prompt (str (:gen-prompt db))
+                                 :model (str (:gen-model db))
+                                 :aspect (view/gen-aspect db)
+                                 :bounds (:bounds (view/gen-target db))})))
           nil)
         (when-let [action (view/act->action act)] (dispatch! action))))))
 
@@ -863,9 +902,11 @@
         (reset! acts-el nil)
         (reset! canvas-el nil))
       :reagent-render
-      (fn [{:keys [db* sync studio]} & [{:keys [title]}]]
+      (fn [{:keys [db* sync studio generate]} & [{:keys [title]}]]
         (when-let [db @db*]
           (-> (view/app-view db {:title title
                                  :sync? (boolean sync)
-                                 :library? (boolean studio)})
+                                 :library? (boolean studio)
+                                 ;; 生成先を持たない host に生成の面を出さない。
+                                 :gen? (boolean generate)})
               (update 1 assoc :ref #(reset! root %)))))})))

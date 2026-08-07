@@ -316,3 +316,77 @@
     (testing "the canvas keeps the world-coordinate contract genko-render assumes"
       (is (str/includes? out "width=\"1000\""))
       (is (str/includes? out "height=\"720\"")))))
+
+;; ── 生成 ─────────────────────────────────────────────────────────────────────
+
+(deftest gen-target-test
+  (let [panel (g/panel-node "p1" {:x1 100 :y1 200 :x2 400 :y2 400})
+        d (-> (g/new-doc "T" {:page-id "pg" :youshi-id "y"})
+              (assoc-in [:pages 0 :nodes] [panel]))]
+    (testing "コマを選んでいればその中に置く"
+      ;; manga の絵はコマの中に描くもの。既定をページ全面にすると毎回置き直す。
+      (let [t (view/gen-target (db {:doc d :selection #{"p1"}}))]
+        (is (= {:x1 100 :y1 200 :x2 400 :y2 400} (:bounds t)))
+        (is (= "選択中のコマ" (:label t)))))
+    (testing "コマに名前があればそれを名乗る — どこに出るか分からないまま待たせない"
+      (let [named (g/panel-node "p2" {:x1 0 :y1 0 :x2 10 :y2 10 :panelName "1コマ目"})
+            d2 (assoc-in d [:pages 0 :nodes] [named])]
+        (is (= "1コマ目" (:label (view/gen-target (db {:doc d2 :selection #{"p2"}})))))))
+    (testing "選択が無ければページ全体 — 1 枚絵から始める人を拒まない"
+      (let [t (view/gen-target (db {:doc d}))]
+        (is (= g/youshi-trim-bounds (:bounds t)))
+        (is (= "ページ全体" (:label t)))))
+    (testing "コマ以外や複数選択はページ全体（どのコマか一意に決まらない）"
+      (is (= "ページ全体" (:label (view/gen-target (db {:doc d :selection #{"p1" "zz"}})))))
+      (let [txt (g/text-node "t1" {:x 1 :y 1 :text "あ"})
+            d3 (assoc-in d [:pages 0 :nodes] [txt])]
+        (is (= "ページ全体" (:label (view/gen-target (db {:doc d3 :selection #{"t1"}})))))))
+    (testing "座標の欠けた panel でも落ちずにページ全体へ逃がす"
+      (let [broken (g/panel-node "b1" {:x1 nil :y1 nil :x2 nil :y2 nil})
+            d4 (assoc-in d [:pages 0 :nodes] [broken])]
+        (is (= "ページ全体" (:label (view/gen-target (db {:doc d4 :selection #{"b1"}})))))))
+    (testing "aspect は行き先の 幅/高さ（生成サイズへの翻訳は host の仕事）"
+      (is (< (Math/abs (- 1.5 (view/gen-aspect (db {:doc d :selection #{"p1"}})))) 1e-9)))))
+
+(deftest gen-model-options-test
+  (testing "推測なら推測だと書く — 選べるのに何が起きるか分からない、を作らない"
+    (is (= [["a" "A（推測）"]]
+           (view/gen-model-options (db {:gen-models [{:model-id "a" :label "A" :fallback? true}]})))))
+  (testing "版ずれ（family-guess）も隠さない"
+    (is (= [["a" "A（版ずれの可能性）"]]
+           (view/gen-model-options (db {:gen-models [{:model-id "a" :label "A" :exact? false}]})))))
+  (testing "待ち行列があれば言う"
+    (is (= [["a" "A · 待ち 3"]]
+           (view/gen-model-options (db {:gen-models [{:model-id "a" :label "A" :exact? true :queue 3}]})))))
+  (testing "何も無ければ空 — 空の picker を出す判断は view ではなく host が持つ"
+    (is (= [] (view/gen-model-options (db))))))
+
+(deftest gen-view-test
+  (let [with-models {:gen-models [{:model-id "animagine-xl-4.0" :label "Animagine XL 4.0" :exact? true}]}]
+    (testing "プロンプトが空なら生成は押せない"
+      (is (str/includes? (html (view/gen-view (db with-models))) "disabled")))
+    (testing "生成中は押せず、所要時間を先に言う"
+      (let [out (html (view/gen-view (db (merge with-models {:gen-prompt "教室"
+                                                             :gen-status :loading}))))]
+        (is (str/includes? out "disabled"))
+        (is (str/includes? out "60〜100 秒"))))
+    (testing "失敗は上流の文字列をそのまま出す"
+      ;; 『生成に失敗しました』に潰すと、直せる人が原因に辿り着けない。
+      (let [out (html (view/gen-view (db (merge with-models
+                                                {:gen-status [:error "no GATEWAY_URL configured"]}))))]
+        (is (str/includes? out "no GATEWAY_URL configured"))))
+    (testing "生成の act は host effect であって doc action ではない"
+      (is (nil? (view/act->action "generate")))
+      (is (= ["generate" nil] (view/host-act "generate"))))))
+
+(deftest sidebar-shows-generation-only-when-the-host-has-one-test
+  ;; 繋がっていない場所にボタンだけ在るのは、押せるのに何も起きない control と同じ。
+  (is (not (str/includes? (html (view/sidebar-view (db))) "genko-gen")))
+  (is (str/includes? (html (view/sidebar-view (db) {:gen? true})) "genko-gen")))
+
+(deftest prompt-can-be-cleared-test
+  (testing "select の空は placeholder の戻り、テキストの空は消したという意思"
+    (is (nil? (view/change-act->action "panel-preset" "")) "preset を再適用しない")
+    (is (= [:set-gen-prompt ""] (view/change-act->action "gen-prompt" ""))
+        "空にできないと、欄は空なのに db は古い文を持ったままになる")
+    (is (= [:set-gen-prompt "教室"] (view/change-act->action "gen-prompt" "教室")))))

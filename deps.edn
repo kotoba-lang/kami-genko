@@ -28,6 +28,13 @@
          :git/sha "cc8f4849af5def7ea535fd6c0b8a623ccca645e9"}
         ;; canvaskit: viewport 数学の正本 (UIScrollView semantics)。genko-render の
         ;; pan/zoom/world<->screen が委譲する (ADR-2607071130。旧 freeboard 移植コピーを差し戻し)。zero-dep。
+        ;; murakumo.generation.image — 画像生成 gate の作法(host / 認証の有無 /
+        ;; 受理されるサイズ / model map の畳み方 / proxy してはいけない理由)の
+        ;; 共有クライアント。genko-app(host wrapper)だけが使う —— genko-view /
+        ;; genko-ui はベンダを知らないまま。
+        io.github.kotoba-lang/cloud-murakumo-generation
+        {:git/url "https://github.com/kotoba-lang/cloud-murakumo-generation.git"
+         :git/sha "4826c51f95d4a53b5c2272afe0b9900adefd5440"}
         io.github.kotoba-lang/canvaskit {:git/url "https://github.com/kotoba-lang/canvaskit.git"
                                          :git/sha "2e8ab2a996d5f405a9fd601e42993451c1f34874"}
         ;; kotobase.{client,cacao,cid} — canonical kotobase.net datom-plane client
